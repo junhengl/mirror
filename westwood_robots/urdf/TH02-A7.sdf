@@ -1,0 +1,1464 @@
+<sdf version='1.7'>
+  <model name='TH02-A7'>
+    <link name='BASE_LINK'>
+      <inertial>
+        <pose>-0.08171 7.4e-05 -0.01979 0 -0 0</pose>
+        <mass>12.7295</mass>
+        <inertia>
+          <ixx>0.257062</ixx>
+          <ixy>-0.000133</ixy>
+          <ixz>0.031411</ixz>
+          <iyy>0.316902</iyy>
+          <iyz>0.000321</iyz>
+          <izz>0.173619</izz>
+        </inertia>
+      </inertial>
+      <collision name='BASE_LINK_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/BASE_LINK.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='BASE_LINK_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/BASE_LINK.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HEAD_YAW' type='revolute'>
+      <pose relative_to='BASE_LINK'>-0.069374 0 0.230836 0 -0 0</pose>
+      <parent>BASE_LINK</parent>
+      <child>NECK</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='NECK'>
+      <pose relative_to='HEAD_YAW'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0.00017 -0.00489 0 -0 0</pose>
+        <mass>0.34044</mass>
+        <inertia>
+          <ixx>0.000199</ixx>
+          <ixy>1.56e-05</ixy>
+          <ixz>-2.91e-05</ixz>
+          <iyy>0.000274</iyy>
+          <iyz>-2.51e-06</iyz>
+          <izz>0.000167</izz>
+        </inertia>
+      </inertial>
+      <collision name='NECK_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/NECK.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='NECK_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/NECK.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HEAD_PITCH' type='revolute'>
+      <pose relative_to='NECK'>0 0 0 1.5708 -0 0</pose>
+      <parent>NECK</parent>
+      <child>HEAD</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='HEAD'>
+      <pose relative_to='HEAD_PITCH'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.00094 0.0631 -1e-05 0 -0 0</pose>
+        <mass>0.67367</mass>
+        <inertia>
+          <ixx>0.004633</ixx>
+          <ixy>9.34e-05</ixy>
+          <ixz>0.000261</ixz>
+          <iyy>0.003171</iyy>
+          <iyz>1.21e-06</iyz>
+          <izz>0.004426</izz>
+        </inertia>
+      </inertial>
+      <collision name='HEAD_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HEAD.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='HEAD_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HEAD.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HIP_YAW_L' type='revolute'>
+      <pose relative_to='BASE_LINK'>-0.183378 0.0625 -0.288378 0 0.785398 0</pose>
+      <parent>BASE_LINK</parent>
+      <child>HIP_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='HIP_L'>
+      <pose relative_to='HIP_YAW_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.00398 -6e-05 0.00636 0 -0 0</pose>
+        <mass>0.83264</mass>
+        <inertia>
+          <ixx>0.0019</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.00124</iyy>
+          <iyz>0</iyz>
+          <izz>0.00094</izz>
+        </inertia>
+      </inertial>
+      <collision name='HIP_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='HIP_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HIP_ROLL_L' type='revolute'>
+      <pose relative_to='HIP_L'>0.141 0 0 1.5708 0 -1.5708</pose>
+      <parent>HIP_L</parent>
+      <child>HIP_ABAD_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='HIP_ABAD_L'>
+      <pose relative_to='HIP_ROLL_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.00198 0.00146 0.00395 0 -0 0</pose>
+        <mass>2.818</mass>
+        <inertia>
+          <ixx>0.01442</ixx>
+          <ixy>0</ixy>
+          <ixz>2e-05</ixz>
+          <iyy>0.00791</iyy>
+          <iyz>0</iyz>
+          <izz>0.0072</izz>
+        </inertia>
+      </inertial>
+      <collision name='HIP_ABAD_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_ABAD_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='HIP_ABAD_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_ABAD_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HIP_PITCH_L' type='revolute'>
+      <pose relative_to='HIP_ABAD_L'>-0.029 0 0 -1.5708 0.785398 -1.5708</pose>
+      <parent>HIP_ABAD_L</parent>
+      <child>FEMUR_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='FEMUR_L'>
+      <pose relative_to='HIP_PITCH_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.06112 0.00177 -0.02002 0 -0 0</pose>
+        <mass>3.75393</mass>
+        <inertia>
+          <ixx>0.01172</ixx>
+          <ixy>0.00157</ixy>
+          <ixz>-0.00098</ixz>
+          <iyy>0.07027</iyy>
+          <iyz>-0.00014</iyz>
+          <izz>0.07595</izz>
+        </inertia>
+      </inertial>
+      <collision name='FEMUR_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FEMUR_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='FEMUR_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FEMUR_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='KNEE_PITCH_L' type='revolute'>
+      <pose relative_to='FEMUR_L'>0.375 0 0 0 -0 0</pose>
+      <parent>FEMUR_L</parent>
+      <child>TIBIA_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='TIBIA_L'>
+      <pose relative_to='KNEE_PITCH_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.09678 0.00694 -6e-05 0 -0 0</pose>
+        <mass>1.27716</mass>
+        <inertia>
+          <ixx>0.00091</ixx>
+          <ixy>0.00069</ixy>
+          <ixz>-1e-05</ixz>
+          <iyy>0.02323</iyy>
+          <iyz>0</iyz>
+          <izz>0.02318</izz>
+        </inertia>
+      </inertial>
+      <collision name='TIBIA_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/TIBIA_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='TIBIA_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/TIBIA_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ANKLE_PITCH_L' type='revolute'>
+      <pose relative_to='TIBIA_L'>0.375 0 0 0 -0 0</pose>
+      <parent>TIBIA_L</parent>
+      <child>ANKLE_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='ANKLE_L'>
+      <pose relative_to='ANKLE_PITCH_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.006946</mass>
+        <inertia>
+          <ixx>0</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0</iyy>
+          <iyz>0</iyz>
+          <izz>0</izz>
+        </inertia>
+      </inertial>
+      <collision name='ANKLE_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ANKLE_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='ANKLE_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ANKLE_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ANKLE_ROLL_L' type='revolute'>
+      <pose relative_to='ANKLE_L'>0 0 0 -1.5708 0 0</pose>
+      <parent>ANKLE_L</parent>
+      <child>FOOT_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='FOOT_L'>
+      <pose relative_to='ANKLE_ROLL_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.0337 5e-05 0.04684 0 -0 0</pose>
+        <mass>0.41628</mass>
+        <inertia>
+          <ixx>0.002594</ixx>
+          <ixy>9.89e-07</ixy>
+          <ixz>0.000725</ixz>
+          <iyy>0.002998</iyy>
+          <iyz>1.24e-06</iyz>
+          <izz>0.000722</izz>
+        </inertia>
+      </inertial>
+      <collision name='FOOT_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOOT_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='FOOT_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOOT_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HIP_YAW_R' type='revolute'>
+      <pose relative_to='BASE_LINK'>-0.183378 -0.0625 -0.288378 0 0.785398 0</pose>
+      <parent>BASE_LINK</parent>
+      <child>HIP_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='HIP_R'>
+      <pose relative_to='HIP_YAW_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.00398 -6e-05 0.00636 0 -0 0</pose>
+        <mass>0.83264</mass>
+        <inertia>
+          <ixx>0.0019</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.00124</iyy>
+          <iyz>0</iyz>
+          <izz>0.00094</izz>
+        </inertia>
+      </inertial>
+      <collision name='HIP_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='HIP_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HIP_ROLL_R' type='revolute'>
+      <pose relative_to='HIP_R'>0.141 0 0 1.5708 0 -1.5708</pose>
+      <parent>HIP_R</parent>
+      <child>HIP_ABAD_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='HIP_ABAD_R'>
+      <pose relative_to='HIP_ROLL_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.002 0.00147 0.00404 0 -0 0</pose>
+        <mass>2.78794</mass>
+        <inertia>
+          <ixx>0.01442</ixx>
+          <ixy>0</ixy>
+          <ixz>-2e-05</ixz>
+          <iyy>0.00791</iyy>
+          <iyz>0</iyz>
+          <izz>0.0072</izz>
+        </inertia>
+      </inertial>
+      <collision name='HIP_ABAD_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_ABAD_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='HIP_ABAD_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/HIP_ABAD_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='HIP_PITCH_R' type='revolute'>
+      <pose relative_to='HIP_ABAD_R'>0.029 0 0 -1.5708 0.785398 -1.5708</pose>
+      <parent>HIP_ABAD_R</parent>
+      <child>FEMUR_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='FEMUR_R'>
+      <pose relative_to='HIP_PITCH_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.06111 0.00174 0.02002 0 -0 0</pose>
+        <mass>3.75384</mass>
+        <inertia>
+          <ixx>0.01172</ixx>
+          <ixy>0.00157</ixy>
+          <ixz>0.00098</ixz>
+          <iyy>0.07026</iyy>
+          <iyz>0.00014</iyz>
+          <izz>0.07594</izz>
+        </inertia>
+      </inertial>
+      <collision name='FEMUR_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FEMUR_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='FEMUR_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FEMUR_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='KNEE_PITCH_R' type='revolute'>
+      <pose relative_to='FEMUR_R'>0.375 0 0 0 -0 0</pose>
+      <parent>FEMUR_R</parent>
+      <child>TIBIA_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='TIBIA_R'>
+      <pose relative_to='KNEE_PITCH_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.09678 0.00694 -6e-05 0 -0 0</pose>
+        <mass>1.27716</mass>
+        <inertia>
+          <ixx>0.00091</ixx>
+          <ixy>0.00069</ixy>
+          <ixz>-1e-05</ixz>
+          <iyy>0.02323</iyy>
+          <iyz>0</iyz>
+          <izz>0.02318</izz>
+        </inertia>
+      </inertial>
+      <collision name='TIBIA_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/TIBIA_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='TIBIA_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/TIBIA_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ANKLE_PITCH_R' type='revolute'>
+      <pose relative_to='TIBIA_R'>0.375 0 0 0 -0 0</pose>
+      <parent>TIBIA_R</parent>
+      <child>ANKLE_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='ANKLE_R'>
+      <pose relative_to='ANKLE_PITCH_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 -0 0</pose>
+        <mass>0.006946</mass>
+        <inertia>
+          <ixx>7.6e-07</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>7.6e-07</iyy>
+          <iyz>0</iyz>
+          <izz>4e-08</izz>
+        </inertia>
+      </inertial>
+      <collision name='ANKLE_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ANKLE_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='ANKLE_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ANKLE_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ANKLE_ROLL_R' type='revolute'>
+      <pose relative_to='ANKLE_R'>0 0 0 -1.5708 0 0</pose>
+      <parent>ANKLE_R</parent>
+      <child>FOOT_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='FOOT_R'>
+      <pose relative_to='ANKLE_ROLL_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.0337 5e-05 0.04684 0 -0 0</pose>
+        <mass>0.41628</mass>
+        <inertia>
+          <ixx>0.002594</ixx>
+          <ixy>9.89e-07</ixy>
+          <ixz>0.000725</ixz>
+          <iyy>0.002998</iyy>
+          <iyz>1.24e-06</iyz>
+          <izz>0.000722</izz>
+        </inertia>
+      </inertial>
+      <collision name='FOOT_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOOT_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='FOOT_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOOT_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='SHOULDER_PITCH_L' type='revolute'>
+      <pose relative_to='BASE_LINK'>-0.065085 0.1567 0.113475 1.5708 -0 0</pose>
+      <parent>BASE_LINK</parent>
+      <child>UPPERSHOULDER_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='UPPERSHOULDER_L'>
+      <pose relative_to='SHOULDER_PITCH_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.00158 0.00123 0.00673 0 -0 0</pose>
+        <mass>0.43611</mass>
+        <inertia>
+          <ixx>0.000385927</ixx>
+          <ixy>-3.28e-07</ixy>
+          <ixz>-9.42e-07</ixz>
+          <iyy>0.000304104</iyy>
+          <iyz>-5.56e-06</iyz>
+          <izz>0.000234735</izz>
+        </inertia>
+      </inertial>
+      <collision name='UPPERSHOULDER_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERSHOULDER_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='UPPERSHOULDER_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERSHOULDER_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='SHOULDER_ROLL_L' type='revolute'>
+      <pose relative_to='UPPERSHOULDER_L'>0 0 0 0 1.5708 0</pose>
+      <parent>UPPERSHOULDER_L</parent>
+      <child>LOWERSHOULDER_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='LOWERSHOULDER_L'>
+      <pose relative_to='SHOULDER_ROLL_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.0535 6e-05 -2e-05 0 -0 0</pose>
+        <mass>0.35798</mass>
+        <inertia>
+          <ixx>0.000261</ixx>
+          <ixy>1.67e-06</ixy>
+          <ixz>-2.5e-07</ixz>
+          <iyy>0.001315</iyy>
+          <iyz>-1.55e-08</iyz>
+          <izz>0.001242</izz>
+        </inertia>
+      </inertial>
+      <collision name='LOWERSHOULDER_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERSHOULDER_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='LOWERSHOULDER_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERSHOULDER_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='SHOULDER_YAW_L' type='revolute'>
+      <pose relative_to='LOWERSHOULDER_L'>0 0 0 3.14159 -1.5708 0</pose>
+      <parent>LOWERSHOULDER_L</parent>
+      <child>UPPERARM_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='UPPERARM_L'>
+      <pose relative_to='SHOULDER_YAW_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.00152 0.01042 0.1973 0 -0 0</pose>
+        <mass>0.51544</mass>
+        <inertia>
+          <ixx>0.021671</ixx>
+          <ixy>-1.03e-05</ixy>
+          <ixz>-0.000175798</ixz>
+          <iyy>0.0215077</iyy>
+          <iyz>0.00119714</iyz>
+          <izz>0.000365985</izz>
+        </inertia>
+      </inertial>
+      <collision name='UPPERARM_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERARM_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='UPPERARM_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERARM_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ELBOW_PITCH_L' type='revolute'>
+      <pose relative_to='UPPERARM_L'>0 0.015 0.22495 3.14159 -1.5708 0</pose>
+      <parent>UPPERARM_L</parent>
+      <child>ELBOW_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='ELBOW_L'>
+      <pose relative_to='ELBOW_PITCH_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.05387 0.01441 -1e-05 0 -0 0</pose>
+        <mass>0.37854</mass>
+        <inertia>
+          <ixx>0.000368777</ixx>
+          <ixy>0.000307949</ixy>
+          <ixz>-5.93e-07</ixz>
+          <iyy>0.00143067</iyy>
+          <iyz>2.39e-07</iyz>
+          <izz>0.00143185</izz>
+        </inertia>
+      </inertial>
+      <collision name='ELBOW_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ELBOW_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='ELBOW_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ELBOW_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ELBOW_YAW_L' type='revolute'>
+      <pose relative_to='ELBOW_L'>0.15495 0.015 0 3.14134 -1.5708 0</pose>
+      <parent>ELBOW_L</parent>
+      <child>FOREARM_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='FOREARM_L'>
+      <pose relative_to='ELBOW_YAW_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.00164 2e-05 -0.01407 0 -0 0</pose>
+        <mass>0.47694</mass>
+        <inertia>
+          <ixx>0.00068432</ixx>
+          <ixy>2.81e-07</ixy>
+          <ixz>-4.7e-06</ixz>
+          <iyy>0.00060081</iyy>
+          <iyz>-7.48e-07</iyz>
+          <izz>0.000265072</izz>
+        </inertia>
+      </inertial>
+      <collision name='FOREARM_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOREARM_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='FOREARM_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOREARM_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='WRIST_PITCH_L' type='revolute'>
+      <pose relative_to='FOREARM_L'>0 0 0 3.14159 -1.5708 0</pose>
+      <parent>FOREARM_L</parent>
+      <child>UPPERWRIST_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='UPPERWRIST_L'>
+      <pose relative_to='WRIST_PITCH_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.05463 0.00013 7e-05 0 -0 0</pose>
+        <mass>0.37004</mass>
+        <inertia>
+          <ixx>0.000277159</ixx>
+          <ixy>3.87e-06</ixy>
+          <ixz>2.13e-06</ixz>
+          <iyy>0.00141266</iyy>
+          <iyz>-5.78e-08</iyz>
+          <izz>0.00133748</izz>
+        </inertia>
+      </inertial>
+      <collision name='UPPERWRIST_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERWRIST_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='UPPERWRIST_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERWRIST_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='WRIST_YAW_L' type='revolute'>
+      <pose relative_to='UPPERWRIST_L'>0 0 0 3.14159 -1.5708 0</pose>
+      <parent>UPPERWRIST_L</parent>
+      <child>LOWERWRIST_L</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='LOWERWRIST_L'>
+      <pose relative_to='WRIST_YAW_L'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 -2e-06 0.000108 0 -0 0</pose>
+        <mass>0.42</mass>
+        <inertia>
+          <ixx>5.16e-12</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>5.15e-12</iyy>
+          <iyz>-1.4e-13</iyz>
+          <izz>1.5e-13</izz>
+        </inertia>
+      </inertial>
+      <collision name='LOWERWRIST_L_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERWRIST_L.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='LOWERWRIST_L_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERWRIST_L.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='SHOULDER_PITCH_R' type='revolute'>
+      <pose relative_to='BASE_LINK'>-0.065085 -0.1567 0.113475 1.5708 -0 0</pose>
+      <parent>BASE_LINK</parent>
+      <child>UPPERSHOULDER_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='UPPERSHOULDER_R'>
+      <pose relative_to='SHOULDER_PITCH_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.00158 0.00121 -0.00674 0 -0 0</pose>
+        <mass>0.43611</mass>
+        <inertia>
+          <ixx>0.000385927</ixx>
+          <ixy>-2.6e-07</ixy>
+          <ixz>9.81e-07</ixz>
+          <iyy>0.000304132</iyy>
+          <iyz>5.57e-06</iyz>
+          <izz>0.000234707</izz>
+        </inertia>
+      </inertial>
+      <collision name='UPPERSHOULDER_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERSHOULDER_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='UPPERSHOULDER_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERSHOULDER_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='SHOULDER_ROLL_R' type='revolute'>
+      <pose relative_to='UPPERSHOULDER_R'>0 0 0 3.14159 -1.5708 0</pose>
+      <parent>UPPERSHOULDER_R</parent>
+      <child>LOWERSHOULDER_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='LOWERSHOULDER_R'>
+      <pose relative_to='SHOULDER_ROLL_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.0535 -6e-05 2e-05 0 -0 0</pose>
+        <mass>0.35798</mass>
+        <inertia>
+          <ixx>0.000261</ixx>
+          <ixy>-1.67e-06</ixy>
+          <ixz>2.5e-07</ixz>
+          <iyy>0.001315</iyy>
+          <iyz>-1.55e-08</iyz>
+          <izz>0.001242</izz>
+        </inertia>
+      </inertial>
+      <collision name='LOWERSHOULDER_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERSHOULDER_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='LOWERSHOULDER_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERSHOULDER_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='SHOULDER_YAW_R' type='revolute'>
+      <pose relative_to='LOWERSHOULDER_R'>0 0 0 3.14159 -1.5708 0</pose>
+      <parent>LOWERSHOULDER_R</parent>
+      <child>UPPERARM_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='UPPERARM_R'>
+      <pose relative_to='SHOULDER_YAW_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.00152 -0.0104 0.1973 0 -0 0</pose>
+        <mass>0.51544</mass>
+        <inertia>
+          <ixx>0.0216719</ixx>
+          <ixy>1.03e-05</ixy>
+          <ixz>-0.0001758</ixz>
+          <iyy>0.0215089</iyy>
+          <iyz>-0.001195</iyz>
+          <izz>0.000365708</izz>
+        </inertia>
+      </inertial>
+      <collision name='UPPERARM_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERARM_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='UPPERARM_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERARM_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ELBOW_PITCH_R' type='revolute'>
+      <pose relative_to='UPPERARM_R'>0 -0.015 0.22495 3.14159 -1.5708 0</pose>
+      <parent>UPPERARM_R</parent>
+      <child>ELBOW_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='ELBOW_R'>
+      <pose relative_to='ELBOW_PITCH_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.05387 -0.01441 1e-05 0 -0 0</pose>
+        <mass>0.37853</mass>
+        <inertia>
+          <ixx>0.000368755</ixx>
+          <ixy>-0.000307924</ixy>
+          <ixz>-2.21e-07</ixz>
+          <iyy>0.00143061</iyy>
+          <iyz>-3.69e-07</iyz>
+          <izz>0.00143177</izz>
+        </inertia>
+      </inertial>
+      <collision name='ELBOW_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ELBOW_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='ELBOW_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/ELBOW_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='ELBOW_YAW_R' type='revolute'>
+      <pose relative_to='ELBOW_R'>0.15495 -0.015 0 3.14159 -1.5708 0</pose>
+      <parent>ELBOW_R</parent>
+      <child>FOREARM_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='FOREARM_R'>
+      <pose relative_to='ELBOW_YAW_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>-0.00164 1e-05 -0.01407 0 -0 0</pose>
+        <mass>0.47694</mass>
+        <inertia>
+          <ixx>0.000684321</ixx>
+          <ixy>-2.15e-07</ixy>
+          <ixz>4.7e-06</ixz>
+          <iyy>0.000600813</iyy>
+          <iyz>-1.32e-07</iyz>
+          <izz>0.000265071</izz>
+        </inertia>
+      </inertial>
+      <collision name='FOREARM_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOREARM_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='FOREARM_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/FOREARM_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='WRIST_PITCH_R' type='revolute'>
+      <pose relative_to='FOREARM_R'>0 0 0 3.14159 -1.5708 0</pose>
+      <parent>FOREARM_R</parent>
+      <child>UPPERWRIST_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='UPPERWRIST_R'>
+      <pose relative_to='WRIST_PITCH_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0.05463 -0.00013 9e-05 0 -0 0</pose>
+        <mass>0.37004</mass>
+        <inertia>
+          <ixx>0.000277159</ixx>
+          <ixy>-3.87e-06</ixy>
+          <ixz>2.51e-06</ixz>
+          <iyy>0.00141266</iyy>
+          <iyz>5.51e-08</iyz>
+          <izz>0.00133748</izz>
+        </inertia>
+      </inertial>
+      <collision name='UPPERWRIST_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERWRIST_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='UPPERWRIST_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/UPPERWRIST_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+    <joint name='WRIST_YAW_R' type='revolute'>
+      <pose relative_to='UPPERWRIST_R'>0 0 0 3.14159 -1.5708 0</pose>
+      <parent>UPPERWRIST_R</parent>
+      <child>LOWERWRIST_R</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+      </axis>
+    </joint>
+    <link name='LOWERWRIST_R'>
+      <pose relative_to='WRIST_YAW_R'>0 0 0 0 -0 0</pose>
+      <inertial>
+        <pose>0 2e-06 0.000108 0 -0 0</pose>
+        <mass>0.42</mass>
+        <inertia>
+          <ixx>5.16e-12</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>5.15e-12</iyy>
+          <iyz>1.5e-13</iyz>
+          <izz>1.5e-13</izz>
+        </inertia>
+      </inertial>
+      <collision name='LOWERWRIST_R_collision'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERWRIST_R.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name='LOWERWRIST_R_visual'>
+        <pose>0 0 0 0 -0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://TH02-A7/meshes/LOWERWRIST_R.STL</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>
