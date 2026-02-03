@@ -1,0 +1,408 @@
+"""
+MuJoCo Physics Simulation.
+
+Real-time physics simulation with torque control interface.
+Runs at 1kHz (configurable) with optional visualization.
+"""
+
+import numpy as np
+import time
+import threading
+from typing import Optional, Callable, Dict
+
+import mujoco
+import mujoco.viewer
+
+from ..shared_state import SharedState, RobotFeedback
+from ..config import SimConfig, PipelineConfig
+
+
+class MuJoCoSimulation:
+    """
+    MuJoCo-based physics simulation with real-time execution.
+    
+    Features:
+    - 1kHz physics simulation
+    - Torque control interface
+    - State feedback (joint positions, velocities, COM)
+    - Optional visualization with marker rendering
+    """
+    
+    def __init__(self, config: PipelineConfig, shared_state: SharedState, model_path: str = None):
+        self.config = config
+        self.sim_config = config.sim
+        self.shared = shared_state
+        
+        # Load model
+        if model_path is None:
+            import os
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            model_path = os.path.join(base_dir, self.sim_config.model_path)
+        
+        print(f"[Simulation] Loading model from: {model_path}")
+        self.model = mujoco.MjModel.from_xml_path(model_path)
+        self.data = mujoco.MjData(self.model)
+        
+        # Set simulation timestep
+        self.model.opt.timestep = self.sim_config.sim_dt
+        
+        # Viewer (optional)
+        self.viewer: Optional[mujoco.viewer.Handle] = None
+        self.render_enabled = True
+        
+        # Markers for visualization
+        self.markers: Dict[str, np.ndarray] = {
+            'hand_l_des': np.zeros(3),
+            'hand_r_des': np.zeros(3),
+            'elbow_l_des': np.zeros(3),
+            'elbow_r_des': np.zeros(3),
+            'hand_l_act': np.zeros(3),
+            'hand_r_act': np.zeros(3),
+            'elbow_l_act': np.zeros(3),
+            'elbow_r_act': np.zeros(3),
+        }
+        self.markers_lock = threading.Lock()
+        
+        # Timing
+        self.sim_time = 0.0
+        self.wall_time_start = 0.0
+        self.step_count = 0
+        
+        # Running state
+        self.running = False
+        self.paused = False
+        
+        # Fixed base configuration (robot hangs at this height)
+        self.fix_base = True
+        self.fixed_base_pos = np.array([0.0, 0.0, self.sim_config.base_height])  # Hanging height from config
+        self.fixed_base_quat = np.array([1.0, 0.0, 0.0, 0.0])  # Upright
+        
+        # Build joint mapping
+        self._build_joint_map()
+        
+        # Initialize robot pose (uses fixed_base_pos)
+        self._initialize_robot()
+        
+        print(f"[Simulation] Initialized with dt={self.sim_config.sim_dt}s ({1/self.sim_config.sim_dt:.0f}Hz)")
+    
+    def _build_joint_map(self):
+        """Build mapping from joint names to indices."""
+        self.joint_map = {}
+        self.actuator_map = {}
+        
+        for i in range(self.model.njnt):
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
+            if name:
+                self.joint_map[name] = i
+                
+        for i in range(self.model.nu):
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
+            if name:
+                self.actuator_map[name] = i
+                
+        print(f"[Simulation] {len(self.joint_map)} joints, {len(self.actuator_map)} actuators")
+    
+    def _initialize_robot(self):
+        """Initialize robot to hanging pose at configured height."""
+        # Set base position (hanging height from config)
+        self.data.qpos[0:3] = self.fixed_base_pos.copy()  # Use configured height
+        self.data.qpos[3:7] = self.fixed_base_quat.copy()  # Upright orientation
+        
+        # Set joint angles to default standing pose
+        # qpos layout: [base_pos(3), base_quat(4), joints(28)]
+        default_joints = np.array([
+            # Right leg
+            0.0, 0.0, -0.1, 0.2, -0.1, 0.0,
+            # Left leg
+            0.0, 0.0, -0.1, 0.2, -0.1, 0.0,
+            # Right arm
+            0.0, 0.8, -0.5, 0.78, 0.1, 0.4, 0.0,
+            # Left arm
+            0.0, -0.8, -0.5, -0.78, 0.1, -0.4, 0.0,
+            # Head
+            0.0, 0.0
+        ], dtype=np.float64)
+        
+        self.data.qpos[7:7+28] = default_joints
+        
+        # Zero velocities
+        self.data.qvel[:] = 0.0
+        
+        # Forward kinematics to update positions
+        mujoco.mj_forward(self.model, self.data)
+        
+    def set_torques(self, torques: np.ndarray):
+        """
+        Set joint torques for control.
+        
+        Args:
+            torques: Array of 28 joint torques (Nm)
+        """
+        # ctrl array maps to actuators
+        if len(torques) == self.model.nu:
+            self.data.ctrl[:] = torques
+        else:
+            # Assume direct mapping to first nu actuators
+            n = min(len(torques), self.model.nu)
+            self.data.ctrl[:n] = torques[:n]
+    
+    def get_feedback(self) -> RobotFeedback:
+        """
+        Get current robot state feedback.
+        
+        Returns:
+            RobotFeedback with positions, velocities, and COM state
+        """
+        feedback = RobotFeedback()
+        feedback.timestamp = time.time()
+        
+        # Base pose
+        feedback.base_pos = self.data.qpos[0:3].copy()
+        feedback.base_quat = self.data.qpos[3:7].copy()
+        
+        # Base velocity (from qvel)
+        # qvel layout: [base_ang_vel(3), base_lin_vel(3), joint_vel(28)]
+        feedback.base_vel = self.data.qvel[0:6].copy()
+        
+        # Joint positions and velocities
+        feedback.q = self.data.qpos[7:7+28].copy()
+        feedback.dq = self.data.qvel[6:6+28].copy()
+        
+        # COM position and velocity
+        # MuJoCo stores subtree COM in model coordinates
+        feedback.com_pos = self.data.subtree_com[0].copy()  # Root body COM
+        feedback.com_vel = np.zeros(3)  # Would need to compute from momentum
+        
+        return feedback
+    
+    def get_body_positions(self) -> dict:
+        """
+        Get end-effector positions from MuJoCo body xpos.
+        
+        Returns dict with hand_l, hand_r, elbow_l, elbow_r positions.
+        """
+        positions = {}
+        
+        # Body names to look up
+        body_names = {
+            'hand_l': 'LOWERWRIST_L',
+            'hand_r': 'LOWERWRIST_R',
+            'elbow_l': 'ELBOW_L',
+            'elbow_r': 'ELBOW_R',
+        }
+        
+        for key, body_name in body_names.items():
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if body_id >= 0:
+                positions[key] = self.data.xpos[body_id].copy()
+            else:
+                positions[key] = np.zeros(3)
+        
+        return positions
+    
+    def update_markers(self, desired: dict, actual: dict):
+        """Update marker positions for visualization."""
+        with self.markers_lock:
+            for key in ['hand_l', 'hand_r', 'elbow_l', 'elbow_r']:
+                if key in desired:
+                    self.markers[f'{key}_des'] = desired[key].copy()
+                if key in actual:
+                    self.markers[f'{key}_act'] = actual[key].copy()
+    
+    def _render_markers(self):
+        """Render marker spheres in viewer."""
+        if self.viewer is None:
+            return
+            
+        with self.markers_lock:
+            markers = self.markers.copy()
+        
+        with self.viewer.lock():
+            ngeom = 0
+            
+            # Desired markers (red/orange)
+            colors_des = {
+                'hand_l_des': [1.0, 0.2, 0.2, 0.8],  # Red
+                'hand_r_des': [1.0, 0.2, 0.2, 0.8],
+                'elbow_l_des': [1.0, 0.6, 0.0, 0.8],  # Orange
+                'elbow_r_des': [1.0, 0.6, 0.0, 0.8],
+            }
+            
+            # Actual markers (green/cyan)
+            colors_act = {
+                'hand_l_act': [0.2, 1.0, 0.2, 0.8],  # Green
+                'hand_r_act': [0.2, 1.0, 0.2, 0.8],
+                'elbow_l_act': [0.0, 1.0, 1.0, 0.8],  # Cyan
+                'elbow_r_act': [0.0, 1.0, 1.0, 0.8],
+            }
+            
+            # Render desired markers (larger)
+            for key, color in colors_des.items():
+                pos = markers.get(key, np.zeros(3))
+                if np.any(pos != 0) and ngeom < self.viewer.user_scn.maxgeom:
+                    g = self.viewer.user_scn.geoms[ngeom]
+                    g.type = mujoco.mjtGeom.mjGEOM_SPHERE
+                    g.size[:] = [0.05, 0.05, 0.05]  # 5cm spheres
+                    g.pos[:] = pos
+                    g.mat[:] = np.eye(3)
+                    g.rgba[:] = color
+                    ngeom += 1
+            
+            # Render actual markers (slightly smaller)
+            for key, color in colors_act.items():
+                pos = markers.get(key, np.zeros(3))
+                if np.any(pos != 0) and ngeom < self.viewer.user_scn.maxgeom:
+                    g = self.viewer.user_scn.geoms[ngeom]
+                    g.type = mujoco.mjtGeom.mjGEOM_SPHERE
+                    g.size[:] = [0.045, 0.045, 0.045]  # 4.5cm spheres
+                    g.pos[:] = pos
+                    g.mat[:] = np.eye(3)
+                    g.rgba[:] = color
+                    ngeom += 1
+            
+            self.viewer.user_scn.ngeom = ngeom
+    
+    def step(self):
+        """
+        Advance simulation by one timestep.
+        
+        Gets torque commands from shared state, steps physics,
+        and publishes feedback.
+        """
+        # Get torque command from controller
+        torques, cmd_time = self.shared.get_torque_command()
+        self.set_torques(torques)
+        
+        # Fix base position if enabled (robot hanging)
+        if self.fix_base:
+            self.data.qpos[0:3] = self.fixed_base_pos
+            self.data.qpos[3:7] = self.fixed_base_quat
+            self.data.qvel[0:6] = 0.0  # Zero base velocity
+        
+        # Step simulation
+        mujoco.mj_step(self.model, self.data)
+        
+        # Re-fix base after step (to counteract any forces)
+        if self.fix_base:
+            self.data.qpos[0:3] = self.fixed_base_pos
+            self.data.qpos[3:7] = self.fixed_base_quat
+            self.data.qvel[0:6] = 0.0
+        
+        self.sim_time += self.sim_config.sim_dt
+        self.step_count += 1
+        
+        # Publish feedback
+        feedback = self.get_feedback()
+        self.shared.set_robot_feedback(feedback)
+    
+    def start_viewer(self):
+        """Start visualization window."""
+        if self.render_enabled:
+            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            if self.viewer is not None:
+                # Configure camera
+                self.viewer.cam.lookat[:] = [0.0, 0.0, 1.0]
+                self.viewer.cam.distance = 3.0
+                self.viewer.cam.elevation = -20
+                self.viewer.cam.azimuth = 90
+                print("[Simulation] Viewer started")
+    
+    def sync_viewer(self):
+        """Sync viewer with simulation state."""
+        if self.viewer is not None and self.viewer.is_running():
+            self._render_markers()
+            self.viewer.sync()
+    
+    def is_viewer_running(self) -> bool:
+        """Check if viewer window is still open."""
+        if self.viewer is None:
+            return True  # No viewer, consider "running"
+        return self.viewer.is_running()
+    
+    def run_realtime(self, duration: float = None):
+        """
+        Run simulation in real-time.
+        
+        This is a blocking call that runs the simulation loop,
+        synchronizing sim time with wall time.
+        
+        Args:
+            duration: Optional max duration in seconds
+        """
+        self.running = True
+        self.wall_time_start = time.time()
+        self.sim_time = 0.0
+        self.step_count = 0
+        
+        last_render_time = 0.0
+        render_interval = 1.0 / self.sim_config.render_fps
+        
+        # Timing statistics
+        last_stats_time = time.time()
+        stats_step_count = 0
+        
+        print("[Simulation] Starting real-time loop...")
+        
+        try:
+            while self.running:
+                # Check shutdown
+                if self.shared.is_shutdown_requested():
+                    break
+                
+                # Check viewer
+                if not self.is_viewer_running():
+                    self.shared.request_shutdown()
+                    break
+                
+                # Check duration
+                if duration is not None and self.sim_time >= duration:
+                    break
+                
+                # Compute target sim time based on wall time
+                wall_elapsed = time.time() - self.wall_time_start
+                
+                # Step simulation to catch up with wall time
+                while self.sim_time < wall_elapsed and self.running:
+                    if self.paused:
+                        self.wall_time_start = time.time() - self.sim_time
+                        break
+                    
+                    self.step()
+                    stats_step_count += 1
+                
+                # Render at specified framerate
+                if time.time() - last_render_time >= render_interval:
+                    self.sync_viewer()
+                    last_render_time = time.time()
+                
+                # Print timing stats periodically
+                if time.time() - last_stats_time >= 2.0:
+                    actual_hz = stats_step_count / (time.time() - last_stats_time)
+                    self.shared.update_timing('sim', actual_hz)
+                    stats_step_count = 0
+                    last_stats_time = time.time()
+                
+                # Small sleep to prevent CPU spinning
+                time.sleep(0.0001)
+                
+        except KeyboardInterrupt:
+            print("[Simulation] Interrupted")
+        finally:
+            self.running = False
+            print(f"[Simulation] Stopped after {self.step_count} steps ({self.sim_time:.2f}s sim time)")
+    
+    def stop(self):
+        """Stop simulation."""
+        self.running = False
+
+
+class SimulationThread(threading.Thread):
+    """Thread wrapper for running simulation in background."""
+    
+    def __init__(self, sim: MuJoCoSimulation, duration: float = None):
+        super().__init__(daemon=True)
+        self.sim = sim
+        self.duration = duration
+        
+    def run(self):
+        self.sim.run_realtime(self.duration)

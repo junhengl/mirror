@@ -372,16 +372,16 @@ class Robot:
         # Task space weights (for ||J*dq - e||^2_W)
         # =====================================================================
         # Elbow weight matrix (6x6: orientation + position)
-        We = np.diag([0.0, 0.0, 0.0, 50.0, 50.0, 50.0]).astype(np.float64)  # position only
+        We = np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)  # position only
         
         # Hand weight matrix (6x6: orientation + position)
-        Wh = np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)  # position only
+        Wh = np.diag([0.0, 0.0, 0.0, 1000.0, 1000.0, 1000.0]).astype(np.float64)  # position only
         
         # COM weight matrix (6x6)
         Wc = np.eye(6, dtype=np.float64) * 50000
         
         # Joint regularization weight (for ||dq||^2_Wq)
-        Wq = np.eye(DOF, dtype=np.float64) * 100.0
+        Wq = np.eye(DOF, dtype=np.float64) * 1000.0
         Wq[:6, :6] = 0  # no regularization on floating base (it's fixed anyway)
         
         # =====================================================================
@@ -486,8 +486,16 @@ class Robot:
             # Warm start with previous solution (dq=0 means stay at current q)
             self._osqp_solver.warm_start(x=self._osqp_prev_dq*0)
         
-        # Solve
-        result = self._osqp_solver.solve()
+        # Solve (suppress OSQP output)
+        import sys, os
+        devnull = open(os.devnull, 'w')
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            result = self._osqp_solver.solve()
+        finally:
+            sys.stdout = old_stdout
+            devnull.close()
         
         if result.info.status == 'solved' or result.info.status == 'solved_inaccurate':
             dq_sol = result.x.astype(np.float32)
