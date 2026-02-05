@@ -28,12 +28,12 @@ class ControlConfig:
     # PD gains per joint group [kp, kd]
     # Lower Kp and HIGHER Kd for stability when hanging (damping is critical!)
     leg_gains: np.ndarray = field(default_factory=lambda: np.array([50.0, 1.0]))  # [kp, kd]
-    arm_gains: np.ndarray = field(default_factory=lambda: np.array([70.0, 1.0]))
+    arm_gains: np.ndarray = field(default_factory=lambda: np.array([70.0, 2.0]))
     head_gains: np.ndarray = field(default_factory=lambda: np.array([10.0, 1.0]))
     
     # Torque limits (Nm)
     leg_torque_limit: float = 100.0
-    arm_torque_limit: float = 30.0
+    arm_torque_limit: float = 50.0
     head_torque_limit: float = 10.0
     
     # Joint indices (0-based, after floating base)
@@ -69,7 +69,7 @@ class TrackingConfig:
     min_confidence: float = 30.0
     
     # Filter parameters
-    filter_alpha: float = 0.4
+    filter_alpha: float = 0.2
     jump_threshold: float = 0.12  # meters
 
 

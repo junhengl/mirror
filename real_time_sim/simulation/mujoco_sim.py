@@ -210,7 +210,7 @@ class MuJoCoSimulation:
                     self.markers[f'{key}_act'] = actual[key].copy()
     
     def _render_markers(self):
-        """Render marker spheres in viewer."""
+        """Render marker spheres and CBF safety sphere in viewer."""
         if self.viewer is None:
             return
             
@@ -219,6 +219,59 @@ class MuJoCoSimulation:
         
         with self.viewer.lock():
             ngeom = 0
+            
+            # CBF safety sphere at torso (semi-transparent blue)
+            # Get torso COM position from robot body
+            torso_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "BASE_LINK")
+            if torso_body_id >= 0 and ngeom < self.viewer.user_scn.maxgeom:
+                torso_pos = self.data.xpos[torso_body_id].copy()
+                r_torso = 0.13  # Must match r_torso in robot_dynamics.py CBF
+                safety_margin = 0.02  # Must match safety_margin in robot_dynamics.py CBF
+                cbf_radius = r_torso + safety_margin
+                
+                g = self.viewer.user_scn.geoms[ngeom]
+                g.type = mujoco.mjtGeom.mjGEOM_SPHERE
+                g.size[:] = [cbf_radius, cbf_radius, cbf_radius]
+                g.pos[:] = torso_pos
+                g.mat[:] = np.eye(3)
+                g.rgba[:] = [0.0, 0.5, 1.0, 0.35]  # Light blue, semi-transparent
+                ngeom += 1
+            
+            # CBF safety sphere at head (semi-transparent magenta)
+            # Head is offset from COM by [-0.1, 0, 0.3]
+            if torso_body_id >= 0 and ngeom < self.viewer.user_scn.maxgeom:
+                torso_pos = self.data.xpos[torso_body_id].copy()
+                head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float32)
+                head_pos = torso_pos + head_offset
+                r_head = 0.11  # Must match r_head in robot_dynamics.py CBF
+                safety_margin = 0.02  # Must match safety_margin in robot_dynamics.py CBF
+                cbf_radius_head = r_head + safety_margin
+                
+                g = self.viewer.user_scn.geoms[ngeom]
+                g.type = mujoco.mjtGeom.mjGEOM_SPHERE
+                g.size[:] = [cbf_radius_head, cbf_radius_head, cbf_radius_head]
+                g.pos[:] = head_pos
+                g.mat[:] = np.eye(3)
+                g.rgba[:] = [1.0, 0.0, 1.0, 0.25]  # Magenta, semi-transparent
+                ngeom += 1
+            
+            # CBF safety sphere at crotch (semi-transparent green)
+            # Crotch is offset from COM by [-0.1, 0, -0.3]
+            if torso_body_id >= 0 and ngeom < self.viewer.user_scn.maxgeom:
+                torso_pos = self.data.xpos[torso_body_id].copy()
+                crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float32)
+                crotch_pos = torso_pos + crotch_offset
+                r_crotch = 0.16  # Must match r_crotch in robot_dynamics.py CBF
+                safety_margin = 0.02  # Must match safety_margin in robot_dynamics.py CBF
+                cbf_radius_crotch = r_crotch + safety_margin
+                
+                g = self.viewer.user_scn.geoms[ngeom]
+                g.type = mujoco.mjtGeom.mjGEOM_SPHERE
+                g.size[:] = [cbf_radius_crotch, cbf_radius_crotch, cbf_radius_crotch]
+                g.pos[:] = crotch_pos
+                g.mat[:] = np.eye(3)
+                g.rgba[:] = [0.0, 1.0, 0.5, 0.25]  # Cyan-green, semi-transparent
+                ngeom += 1
             
             # Desired markers (red/orange)
             colors_des = {

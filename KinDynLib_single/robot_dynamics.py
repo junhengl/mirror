@@ -176,7 +176,7 @@ class Robot:
         """
         J = np.zeros((6, DOF), dtype=np.float32)
         X = Xend.copy()
-        j = body_index + 1
+        j = body_index +1 
         
         while j >= 0:
             XJ, S = jcalc(self.links[j].joint_type, self.q[self.links[j].dof_index])
@@ -186,7 +186,7 @@ class Robot:
             if self.links[j].parent >= 0:
                 X = X @ XJ @ self.links[j].Xtree
             
-            j = self.links[j].parent
+            j = self.links[j].parent 
         
         return J
     
@@ -372,16 +372,17 @@ class Robot:
         # Task space weights (for ||J*dq - e||^2_W)
         # =====================================================================
         # Elbow weight matrix (6x6: orientation + position)
-        We = np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)  # position only
+        We = 1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)  # position only
         
         # Hand weight matrix (6x6: orientation + position)
-        Wh = np.diag([0.0, 0.0, 0.0, 1000.0, 1000.0, 1000.0]).astype(np.float64)  # position only
+        Wh = 1*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)  # position only
         
         # COM weight matrix (6x6)
         Wc = np.eye(6, dtype=np.float64) * 50000
         
         # Joint regularization weight (for ||dq||^2_Wq)
-        Wq = np.eye(DOF, dtype=np.float64) * 1000.0
+        # Must be much smaller than task weights for good tracking
+        Wq = np.eye(DOF, dtype=np.float64) * 100
         Wq[:6, :6] = 0  # no regularization on floating base (it's fixed anyway)
         
         # =====================================================================
@@ -404,7 +405,106 @@ class Robot:
         J_elbow_r = J_elbow_r.astype(np.float64)
         J_hand_l = J_hand_l.astype(np.float64)
         J_hand_r = J_hand_r.astype(np.float64)
+
+        # ========= Add CBF constraints =========
+        # TORSO sphere (original)
+        d_elbow_com_l = x_elbow_l[3:] - q_fb[:3]   
+        d_elbow_com_r = x_elbow_r[3:] - q_fb[:3]     
+        d_hand_com_l = x_hand_l[3:] - q_fb[:3]   
+        d_hand_com_r = x_hand_r[3:] - q_fb[:3]
         
+        # HEAD sphere offset from COM
+        head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float64)  # Offset from COM
+        head_pos = q_fb[:3] + head_offset  # Head sphere position in world frame
+        
+        # CROTCH sphere offset from COM
+        crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float64)  # Offset from COM
+        crotch_pos = q_fb[:3] + crotch_offset  # Crotch sphere position in world frame
+        
+        # Distance vectors from elbows/hands to head sphere
+        d_elbow_head_l = x_elbow_l[3:] - head_pos
+        d_elbow_head_r = x_elbow_r[3:] - head_pos
+        d_hand_head_l = x_hand_l[3:] - head_pos
+        d_hand_head_r = x_hand_r[3:] - head_pos
+        
+        # Distance vectors from elbows/hands to crotch sphere
+        d_elbow_crotch_l = x_elbow_l[3:] - crotch_pos
+        d_elbow_crotch_r = x_elbow_r[3:] - crotch_pos
+        d_hand_crotch_l = x_hand_l[3:] - crotch_pos
+        d_hand_crotch_r = x_hand_r[3:] - crotch_pos
+        
+        # Sphere radii
+        r_torso = 0.13  # torso radius
+        r_head = 0.11   # head radius
+        r_crotch = 0.16  # crotch radius
+        safety_margin = 0.02  # additional safety margin
+        rho_torso = r_torso + safety_margin
+        rho_head = r_head + safety_margin
+        rho_crotch = r_crotch + safety_margin
+
+        # Barrier functions (h >= 0 means outside sphere)
+        h_elbow_l_torso = np.linalg.norm(d_elbow_com_l)**2 - rho_torso**2
+        h_elbow_r_torso = np.linalg.norm(d_elbow_com_r)**2 - rho_torso**2
+        h_hand_l_torso = np.linalg.norm(d_hand_com_l)**2 - rho_torso**2
+        h_hand_r_torso = np.linalg.norm(d_hand_com_r)**2 - rho_torso**2
+        
+        h_elbow_l_head = np.linalg.norm(d_elbow_head_l)**2 - rho_head**2
+        h_elbow_r_head = np.linalg.norm(d_elbow_head_r)**2 - rho_head**2
+        h_hand_l_head = np.linalg.norm(d_hand_head_l)**2 - rho_head**2
+        h_hand_r_head = np.linalg.norm(d_hand_head_r)**2 - rho_head**2
+        
+        h_elbow_l_crotch = np.linalg.norm(d_elbow_crotch_l)**2 - rho_crotch**2
+        h_elbow_r_crotch = np.linalg.norm(d_elbow_crotch_r)**2 - rho_crotch**2
+        h_hand_l_crotch = np.linalg.norm(d_hand_crotch_l)**2 - rho_crotch**2
+        h_hand_r_crotch = np.linalg.norm(d_hand_crotch_r)**2 - rho_crotch**2
+
+        # Note: Featherstone spatial convention: J[0:3,:]=angular, J[3:6,:]=linear
+        # CBF is position-based, so use the linear (translational) rows J[3:,:]
+        # J_com[:3,:] is already translational (maps Px,Py,Pz DOFs to position)
+        # TORSO constraints
+        aT_elbow_l_torso = 2*d_elbow_com_l.T @ (J_elbow_l[3:, :] - J_com[:3, :])
+        aT_elbow_r_torso = 2*d_elbow_com_r.T @ (J_elbow_r[3:, :] - J_com[:3, :])
+        aT_hand_l_torso = 2*d_hand_com_l.T @ (J_hand_l[3:, :] - J_com[:3, :])
+        aT_hand_r_torso = 2*d_hand_com_r.T @ (J_hand_r[3:, :] - J_com[:3, :])
+        
+        # HEAD constraints (note: head_pos = q_fb[:3] + head_offset, so d/dq[0:3] includes head motion)
+        aT_elbow_l_head = 2*d_elbow_head_l.T @ (J_elbow_l[3:, :] - J_com[:3, :])
+        aT_elbow_r_head = 2*d_elbow_head_r.T @ (J_elbow_r[3:, :] - J_com[:3, :])
+        aT_hand_l_head = 2*d_hand_head_l.T @ (J_hand_l[3:, :] - J_com[:3, :])
+        aT_hand_r_head = 2*d_hand_head_r.T @ (J_hand_r[3:, :] - J_com[:3, :])
+        
+        # CROTCH constraints (note: crotch_pos = q_fb[:3] + crotch_offset, so d/dq[0:3] includes crotch motion)
+        aT_elbow_l_crotch = 2*d_elbow_crotch_l.T @ (J_elbow_l[3:, :] - J_com[:3, :])
+        aT_elbow_r_crotch = 2*d_elbow_crotch_r.T @ (J_elbow_r[3:, :] - J_com[:3, :])
+        aT_hand_l_crotch = 2*d_hand_crotch_l.T @ (J_hand_l[3:, :] - J_com[:3, :])
+        aT_hand_r_crotch = 2*d_hand_crotch_r.T @ (J_hand_r[3:, :] - J_com[:3, :])
+        
+        lambda_cbf = 0.5  # CBF constraint gain
+
+        # Constraint bounds
+        b_elbow_l_torso = -lambda_cbf * h_elbow_l_torso
+        b_elbow_r_torso = -lambda_cbf * h_elbow_r_torso
+        b_hand_l_torso = -lambda_cbf * h_hand_l_torso
+        b_hand_r_torso = -lambda_cbf * h_hand_r_torso
+        
+        b_elbow_l_head = -lambda_cbf * h_elbow_l_head
+        b_elbow_r_head = -lambda_cbf * h_elbow_r_head
+        b_hand_l_head = -lambda_cbf * h_hand_l_head
+        b_hand_r_head = -lambda_cbf * h_hand_r_head
+        
+        b_elbow_l_crotch = -lambda_cbf * h_elbow_l_crotch
+        b_elbow_r_crotch = -lambda_cbf * h_elbow_r_crotch
+        b_hand_l_crotch = -lambda_cbf * h_hand_l_crotch
+        b_hand_r_crotch = -lambda_cbf * h_hand_r_crotch
+        
+        # Concatenate ALL CBF constraints: aT @ dq >= b
+        # Order: torso (4) + head (4) + crotch (4) = 12 total
+        aT = np.vstack([aT_elbow_l_torso, aT_elbow_r_torso, aT_hand_l_torso, aT_hand_r_torso,
+                        aT_elbow_l_head, aT_elbow_r_head, aT_hand_l_head, aT_hand_r_head,
+                        aT_elbow_l_crotch, aT_elbow_r_crotch, aT_hand_l_crotch, aT_hand_r_crotch])  # (12, DOF)
+        b = np.array([b_elbow_l_torso, b_elbow_r_torso, b_hand_l_torso, b_hand_r_torso,
+                      b_elbow_l_head, b_elbow_r_head, b_hand_l_head, b_hand_r_head,
+                      b_elbow_l_crotch, b_elbow_r_crotch, b_hand_l_crotch, b_hand_r_crotch], dtype=np.float64)  # (12,)
         # =====================================================================
         # Build QP: min 0.5 * dq^T @ P @ dq + c^T @ dq
         # 
@@ -440,51 +540,73 @@ class Robot:
         # =====================================================================
         # Inequality constraints: q_min <= q_fb + dq <= q_max
         # Rearranged: q_min - q_fb <= dq <= q_max - q_fb
+        # Plus CBF constraints: aT @ dq >= b  (rearranged: b <= aT @ dq <= inf)
         # =====================================================================
         qj_min = q_min.astype(np.float64)
         qj_max = q_max.astype(np.float64)
         
-        lb = qj_min - q_fb  # lower bound on dq
-        ub = qj_max - q_fb  # upper bound on dq
+        lb_box = qj_min - q_fb  # lower bound on dq (box constraints)
+        ub_box = qj_max - q_fb  # upper bound on dq (box constraints)
+        
+        # Combine box constraints (I @ dq) and CBF constraints (aT @ dq)
+        # OSQP format: l <= A @ dq <= u
+        num_box_constraints = DOF
+        num_cbf_constraints = aT.shape[0]  # 4 (elbow_l, elbow_r, hand_l, hand_r)
+        num_total_constraints = num_box_constraints + num_cbf_constraints
+        
+        # Build combined constraint matrix: [I; aT]
+        A_box = sparse.eye(DOF, format='csc')
+        A_cbf = sparse.csc_matrix(aT)
+        A_combined = sparse.vstack([A_box, A_cbf])
+        
+        # Build combined bounds
+        lb_combined = np.hstack([lb_box, b])  # [lb_box; b]
+        ub_combined = np.hstack([ub_box, np.inf * np.ones(num_cbf_constraints)])  # [ub_box; inf]
+        
+        # # Debug: print CBF values periodically
+        # if not hasattr(self, '_cbf_debug_count'):
+        #     self._cbf_debug_count = 0
+        # self._cbf_debug_count += 1
+        # if self._cbf_debug_count % 500 == 0:  # Every ~1 second at 500Hz
+        #     print(f"[CBF] h_L={h_elbow_l:.4f}, h_R={h_elbow_r:.4f}, "
+        #           f"d_L={np.linalg.norm(d_elbow_com_l):.3f}, d_R={np.linalg.norm(d_elbow_com_r):.3f}, "
+        #           f"rho={rho:.3f}")
         
         # =====================================================================
         # Solve QP using OSQP
         # OSQP format: min 0.5 x'Px + q'x  s.t. l <= Ax <= u
-        # For box constraints: A = I, l = lb, u = ub
+        # Constraints: [I; aT] @ dq with bounds [lb_box; b] <= dq_constraint <= [ub_box; inf]
         # =====================================================================
         P_sparse = sparse.csc_matrix(P)
-        A_sparse = sparse.eye(DOF, format='csc')
+        A_sparse = A_combined  # Combined box + CBF constraints
         
-        # Initialize or update OSQP solver
-        if self._osqp_solver is None:
-            # First call: create solver
-            self._osqp_solver = osqp.OSQP()
-            
-            # Suppress all OSQP output during setup
-            import sys, os
-            devnull = open(os.devnull, 'w')
-            old_stdout = sys.stdout
-            old_stderr = sys.stderr
-            sys.stdout = devnull
-            sys.stderr = devnull
-            
-            try:
-                self._osqp_solver.setup(P_sparse, c, A_sparse, lb, ub,
-                           verbose=False,
-                           polish=True,
-                           eps_abs=1e-5,
-                           eps_rel=1e-5,
-                           max_iter=500,
-                           warm_start=True)
-            finally:
-                sys.stdout = old_stdout
-                sys.stderr = old_stderr
-                devnull.close()
-        else:
-            # Subsequent calls: update problem data and warm start
-            self._osqp_solver.update(q=c, l=lb, u=ub)
-            # Warm start with previous solution (dq=0 means stay at current q)
-            self._osqp_solver.warm_start(x=self._osqp_prev_dq*0)
+        # Recreate solver each iteration (P and A change with robot configuration)
+        # Use warm start from previous solution for faster convergence
+        self._osqp_solver = osqp.OSQP()
+        
+        # Suppress all OSQP output during setup
+        import sys, os
+        devnull = open(os.devnull, 'w')
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = devnull
+        sys.stderr = devnull
+        
+        try:
+            self._osqp_solver.setup(P_sparse, c, A_sparse, lb_combined, ub_combined,
+                       verbose=False,
+                       polish=True,
+                       eps_abs=1e-5,
+                       eps_rel=1e-5,
+                       max_iter=500,
+                       warm_start=True)
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+            devnull.close()
+        
+        # Warm start with previous solution
+        self._osqp_solver.warm_start(x=self._osqp_prev_dq)
         
         # Solve (suppress OSQP output)
         import sys, os

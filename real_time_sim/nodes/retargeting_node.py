@@ -75,7 +75,7 @@ class RetargetingNode:
         
         # Output smoothing
         self.filtered_q = self.q.copy()
-        self.filter_alpha = 0.1
+        self.filter_alpha = 0.4
         self.max_joint_delta = 5  # rad per step at 500Hz
         
         # Base offset for visualization (from config)
