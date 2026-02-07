@@ -90,6 +90,14 @@ class Robot:
         # OSQP solver for warm starting (initialized on first call)
         self._osqp_solver = None
         self._osqp_prev_dq = np.zeros(DOF, dtype=np.float64)  # previous solution for warm start
+        
+        # Distributed QP warm start (13 DOFs each: 6 base + 7 arm)
+        self._osqp_prev_dq_right = np.zeros(13, dtype=np.float64)
+        self._osqp_prev_dq_left = np.zeros(13, dtype=np.float64)
+        
+        # ProxQP solver (proximal augmented Lagrangian, warm-startable)
+        self._proxqp_solver = None
+        self._proxqp_prev_dq = np.zeros(DOF, dtype=np.float64)
     
     def update(self, q, dq):
         """Update robot state
@@ -176,7 +184,7 @@ class Robot:
         """
         J = np.zeros((6, DOF), dtype=np.float32)
         X = Xend.copy()
-        j = body_index +1 
+        j = body_index
         
         while j >= 0:
             XJ, S = jcalc(self.links[j].joint_type, self.q[self.links[j].dof_index])
@@ -630,5 +638,568 @@ class Robot:
         
         q_des = self.q + dq_sol
         dq_des = dq_sol  # return the joint velocity
+        
+        return q_des, dq_des
+
+    def update_task_space_command_qp_distributed_proxqp(self, 
+                                                         x_elbow_l_des, x_elbow_r_des,
+                                                         x_elbow_l, x_elbow_r,
+                                                         x_hand_l_des, x_hand_r_des,
+                                                         x_hand_l, x_hand_r,
+                                                         J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
+                                                         com_des):
+        """Distributed IK with ProxQP: solve separate 13-DOF QPs for each arm.
+        
+        Decouples left/right arm tracking to avoid cross-arm interference while
+        using the faster ProxQP solver. Each arm gets (base 6 + arm 7 = 13 DOF).
+        """
+        try:
+            import proxsuite
+        except ImportError:
+            print("Warning: proxsuite not installed. Install with: pip install proxsuite")
+            print("Falling back to distributed OSQP.")
+            return self.update_task_space_command_qp_distributed(
+                x_elbow_l_des, x_elbow_r_des, x_elbow_l, x_elbow_r,
+                x_hand_l_des, x_hand_r_des, x_hand_l, x_hand_r,
+                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r, com_des)
+        
+        BASE_DOFS = np.arange(0, 6)
+        RIGHT_ARM_DOFS = np.arange(18, 25)
+        LEFT_ARM_DOFS = np.arange(25, 32)
+        
+        right_dofs = np.concatenate([BASE_DOFS, RIGHT_ARM_DOFS])
+        left_dofs = np.concatenate([BASE_DOFS, LEFT_ARM_DOFS])
+        
+        # Weights
+        We = np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 0*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        Wc_primary = np.eye(6, dtype=np.float64) * 5000
+        Wc_secondary = np.eye(6, dtype=np.float64) * 5000
+        
+        # Current state
+        q_fb = self.q.astype(np.float64)
+        e_elbow_l = (x_elbow_l_des - x_elbow_l).astype(np.float64)
+        e_elbow_r = (x_elbow_r_des - x_elbow_r).astype(np.float64)
+        e_hand_l = (x_hand_l_des - x_hand_l).astype(np.float64)
+        e_hand_r = (x_hand_r_des - x_hand_r).astype(np.float64)
+        e_com = (com_des - self.q[:6]).astype(np.float64)
+        
+        J_com_full = np.zeros((6, DOF), dtype=np.float64)
+        J_com_full[:, :6] = np.eye(6, dtype=np.float64)
+        
+        J_elbow_l = J_elbow_l.astype(np.float64)
+        J_elbow_r = J_elbow_r.astype(np.float64)
+        J_hand_l = J_hand_l.astype(np.float64)
+        J_hand_r = J_hand_r.astype(np.float64)
+        
+        qj_min, qj_max = q_min.astype(np.float64), q_max.astype(np.float64)
+        
+        # CBF setup (same as full ProxQP)
+        com_offset = np.array([-0.1, 0.0, 0.0], dtype=np.float64)
+        head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float64)
+        crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float64)
+        head_pos = q_fb[:3] + head_offset
+        crotch_pos = q_fb[:3] + crotch_offset
+        
+        r_torso, r_head, r_crotch = 0.13, 0.11, 0.16
+        rho_torso = r_torso + 0.02
+        rho_head = r_head + 0.02
+        rho_crotch = r_crotch + 0.02
+        lambda_cbf = 0.5
+        
+        def _solve_arm_qp_proxqp(dof_indices, J_elbow, J_hand, e_elbow, e_hand,
+                                  x_elbow, x_hand, side_name, Wc, solver_attr):
+            """Solve one arm's 13-DOF QP with ProxQP."""
+            n = len(dof_indices)
+            J_elbow_sub = J_elbow[:, dof_indices]
+            J_hand_sub = J_hand[:, dof_indices]
+            J_com_sub = J_com_full[:, dof_indices]
+            Wq_sub = np.eye(n, dtype=np.float64) * 10
+            
+            # Cost: min 0.5 dq^T H dq + g^T dq
+            H = (J_elbow_sub.T @ We @ J_elbow_sub +
+                 J_hand_sub.T @ Wh @ J_hand_sub +
+                 J_com_sub.T @ Wc @ J_com_sub +
+                 Wq_sub)
+            H = 0.5 * (H + H.T)
+            H += np.eye(n) * 1e-6
+            
+            g = -(J_elbow_sub.T @ We @ e_elbow +
+                  J_hand_sub.T @ Wh @ e_hand +
+                  J_com_sub.T @ Wc @ e_com)
+            
+            # CBF constraints (distance-based)
+            x_elbow_pos = x_elbow[3:].astype(np.float64)
+            x_hand_pos = x_hand[3:].astype(np.float64)
+            
+            d_elbow_com = x_elbow_pos - q_fb[:3] - com_offset
+            d_hand_com = x_hand_pos - q_fb[:3] - com_offset
+            d_elbow_head = x_elbow_pos - head_pos
+            d_hand_head = x_hand_pos - head_pos
+            d_elbow_crotch = x_elbow_pos - crotch_pos
+            d_hand_crotch = x_hand_pos - crotch_pos
+            
+            h_values = np.array([
+                np.linalg.norm(d_elbow_com)**2 - rho_torso**2,
+                np.linalg.norm(d_hand_com)**2 - rho_torso**2,
+                np.linalg.norm(d_elbow_head)**2 - rho_head**2,
+                np.linalg.norm(d_hand_head)**2 - rho_head**2,
+                np.linalg.norm(d_elbow_crotch)**2 - rho_crotch**2,
+                np.linalg.norm(d_hand_crotch)**2 - rho_crotch**2,
+            ], dtype=np.float64)
+            
+            J_elbow_lin = J_elbow[3:, dof_indices]
+            J_hand_lin = J_hand[3:, dof_indices]
+            J_com_lin = J_com_full[:3, dof_indices]
+            
+            d_vectors = [
+                d_elbow_com, d_hand_com,
+                d_elbow_head, d_hand_head,
+                d_elbow_crotch, d_hand_crotch
+            ]
+            J_refs = [J_elbow_lin, J_hand_lin, J_elbow_lin, J_hand_lin, J_elbow_lin, J_hand_lin]
+            
+            aT_rows = [2 * d @ (J_ref - J_com_lin) for d, J_ref in zip(d_vectors, J_refs)]
+            aT_cbf = np.vstack(aT_rows)  # (6, n)
+            b_cbf = -lambda_cbf * h_values
+            
+            # Box + CBF constraints: l <= C dq <= u
+            lb_box = qj_min[dof_indices] - q_fb[dof_indices]
+            ub_box = qj_max[dof_indices] - q_fb[dof_indices]
+            
+            C = np.vstack([np.eye(n, dtype=np.float64), aT_cbf])
+            l = np.concatenate([lb_box, b_cbf])
+            u = np.concatenate([ub_box, np.full(6, 1e30)])
+            
+            n_ineq = C.shape[0]
+            
+            # Solve with ProxQP
+            try:
+                # Get or create solver for this arm
+                if not hasattr(self, solver_attr) or getattr(self, solver_attr) is None:
+                    solver = proxsuite.proxqp.dense.QP(n=n, n_eq=0, n_in=n_ineq)
+                    solver.settings.eps_abs = 1e-4
+                    solver.settings.eps_rel = 0.0
+                    solver.settings.max_iter = 100
+                    solver.settings.verbose = False
+                    solver.settings.initial_guess = (
+                        proxsuite.proxqp.InitialGuess.WARM_START_WITH_PREVIOUS_RESULT
+                    )
+                    solver.init(H=H, g=g, A=None, b=None, C=C, l=l, u=u)
+                    setattr(self, solver_attr, solver)
+                else:
+                    solver = getattr(self, solver_attr)
+                    solver.update(H=H, g=g, A=None, b=None, C=C, l=l, u=u)
+                
+                solver.solve()
+                dq_sol = solver.results.x.astype(np.float32)
+                
+            except Exception as e:
+                print(f"[DistProxQP] {side_name}: {e}, unconstrained fallback")
+                try:
+                    dq_sol = np.linalg.solve(H, -g).astype(np.float32)
+                except:
+                    dq_sol = np.zeros(n, dtype=np.float32)
+            
+            return dq_sol
+        
+        # Solve both arms
+        dq_right = _solve_arm_qp_proxqp(right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
+                                         x_elbow_r, x_hand_r, 'right', Wc_primary, '_proxqp_solver_right')
+        dq_left = _solve_arm_qp_proxqp(left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
+                                        x_elbow_l, x_hand_l, 'left', Wc_secondary, '_proxqp_solver_left')
+        
+        # Combine: right arm's base takes priority
+        dq_sol = np.zeros(DOF, dtype=np.float32)
+        dq_sol[:6] = dq_right[:6].astype(np.float32)
+        dq_sol[18:25] = dq_right[6:].astype(np.float32)
+        dq_sol[25:32] = dq_left[6:].astype(np.float32)
+        
+        q_des = self.q + dq_sol
+        dq_des = dq_sol
+        
+        return q_des, dq_des
+
+    def update_task_space_command_qp_distributed(self, 
+                                                  x_elbow_l_des, x_elbow_r_des,
+                                                  x_elbow_l, x_elbow_r,
+                                                  x_hand_l_des, x_hand_r_des,
+                                                  x_hand_l, x_hand_r,
+                                                  J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
+                                                  com_des):
+        """Distributed IK: solve separate QP for each arm to avoid cross-arm interference.
+        
+        Solves two independent 13-DOF QPs (base + each arm) to decouple arm tracking.
+        """
+        try:
+            import osqp
+            from scipy import sparse
+        except ImportError:
+            return self.update_task_space_command_qp(
+                x_elbow_l_des, x_elbow_r_des, x_elbow_l, x_elbow_r,
+                x_hand_l_des, x_hand_r_des, x_hand_l, x_hand_r,
+                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r, com_des)
+        
+        BASE_DOFS = np.arange(0, 6)
+        RIGHT_ARM_DOFS = np.arange(18, 25)
+        LEFT_ARM_DOFS = np.arange(25, 32)
+        
+        right_dofs = np.concatenate([BASE_DOFS, RIGHT_ARM_DOFS])
+        left_dofs = np.concatenate([BASE_DOFS, LEFT_ARM_DOFS])
+        
+        # Weights: right arm gets primary COM control, left arm gets secondary
+        We = 1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 10*np.diag([0.0, 0.0, 0.0, 10.0, 10.0, 10.0]).astype(np.float64)
+        Wc_primary = np.eye(6, dtype=np.float64) * 5000
+        Wc_secondary = np.eye(6, dtype=np.float64) * 5000
+        Wq_diag = np.ones(DOF, dtype=np.float64) * 50
+        Wq_diag[:6] = 0
+        
+        # Current state
+        q_fb = self.q.astype(np.float64)
+        e_elbow_l = (x_elbow_l_des - x_elbow_l).astype(np.float64)
+        e_elbow_r = (x_elbow_r_des - x_elbow_r).astype(np.float64)
+        e_hand_l = (x_hand_l_des - x_hand_l).astype(np.float64)
+        e_hand_r = (x_hand_r_des - x_hand_r).astype(np.float64)
+        e_com = (com_des - self.q[:6]).astype(np.float64)
+        
+        J_com_full = np.zeros((6, DOF), dtype=np.float64)
+        J_com_full[:, :6] = np.eye(6, dtype=np.float64)
+        
+        J_elbow_l, J_elbow_r = J_elbow_l.astype(np.float64), J_elbow_r.astype(np.float64)
+        J_hand_l, J_hand_r = J_hand_l.astype(np.float64), J_hand_r.astype(np.float64)
+        
+        qj_min, qj_max = q_min.astype(np.float64), q_max.astype(np.float64)
+        
+        # CBF setup
+        head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float64)
+        crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float64)
+        head_pos, crotch_pos = q_fb[:3] + head_offset, q_fb[:3] + crotch_offset
+        
+        r_torso, r_head, r_crotch = 0.13, 0.11, 0.16
+        rho_torso = r_torso + 0.02
+        rho_head = r_head + 0.02
+        rho_crotch = r_crotch + 0.02
+        lambda_cbf = 0.5
+        
+        def _solve_arm_qp(dof_indices, J_elbow, J_hand, e_elbow, e_hand,
+                          x_elbow, x_hand, prev_dq, side_name, Wc):
+            n = len(dof_indices)
+            J_elbow_sub = J_elbow[:, dof_indices]
+            J_hand_sub = J_hand[:, dof_indices]
+            J_com_sub = J_com_full[:, dof_indices]
+            Wq_sub = np.diag(Wq_diag[dof_indices])
+            
+            P = (J_elbow_sub.T @ We @ J_elbow_sub +
+                 J_hand_sub.T @ Wh @ J_hand_sub +
+                 J_com_sub.T @ Wc @ J_com_sub +
+                 Wq_sub)
+            P = 0.5 * (P + P.T)
+            P += np.eye(n) * 1e-6
+            
+            c = -(J_elbow_sub.T @ We @ e_elbow +
+                  J_hand_sub.T @ Wh @ e_hand +
+                  J_com_sub.T @ Wc @ e_com)
+            
+            # CBF distances
+            x_elbow_pos = x_elbow[3:].astype(np.float64)
+            x_hand_pos = x_hand[3:].astype(np.float64)
+            
+            h_values = np.array([
+                np.linalg.norm(x_elbow_pos - q_fb[:3])**2 - rho_torso**2,
+                np.linalg.norm(x_hand_pos - q_fb[:3])**2 - rho_torso**2,
+                np.linalg.norm(x_elbow_pos - head_pos)**2 - rho_head**2,
+                np.linalg.norm(x_hand_pos - head_pos)**2 - rho_head**2,
+                np.linalg.norm(x_elbow_pos - crotch_pos)**2 - rho_crotch**2,
+                np.linalg.norm(x_hand_pos - crotch_pos)**2 - rho_crotch**2,
+            ], dtype=np.float64)
+            
+            J_elbow_lin = J_elbow[3:, dof_indices]
+            J_hand_lin = J_hand[3:, dof_indices]
+            J_com_lin = J_com_full[:3, dof_indices]
+            
+            d_vectors = [
+                x_elbow_pos - q_fb[:3], x_hand_pos - q_fb[:3],
+                x_elbow_pos - head_pos, x_hand_pos - head_pos,
+                x_elbow_pos - crotch_pos, x_hand_pos - crotch_pos
+            ]
+            J_refs = [J_elbow_lin, J_hand_lin, J_elbow_lin, J_hand_lin, J_elbow_lin, J_hand_lin]
+            
+            aT_rows = [2 * d @ (J_ref - J_com_lin) for d, J_ref in zip(d_vectors, J_refs)]
+            aT_cbf = np.vstack(aT_rows)
+            b_cbf = -lambda_cbf * h_values
+            
+            lb_box = qj_min[dof_indices] - q_fb[dof_indices]
+            ub_box = qj_max[dof_indices] - q_fb[dof_indices]
+            
+            A_combined = sparse.vstack([sparse.eye(n, format='csc'), sparse.csc_matrix(aT_cbf)])
+            lb_combined = np.hstack([lb_box, b_cbf])
+            ub_combined = np.hstack([ub_box, np.inf * np.ones(6)])
+            
+            solver = osqp.OSQP()
+            import sys, os
+            devnull = open(os.devnull, 'w')
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = devnull, devnull
+            try:
+                solver.setup(sparse.csc_matrix(P), c, A_combined, lb_combined, ub_combined,
+                            verbose=False, polish=True, eps_abs=1e-5, eps_rel=1e-5, max_iter=500, warm_start=True)
+                solver.warm_start(x=prev_dq)
+                result = solver.solve()
+            finally:
+                sys.stdout, sys.stderr = old_stdout, old_stderr
+                devnull.close()
+            
+            if result.info.status in ('solved', 'solved_inaccurate'):
+                return result.x
+            else:
+                print(f"[DistQP] {side_name}: {result.info.status}, unconstrained fallback")
+                try:
+                    return np.linalg.solve(P, -c)
+                except:
+                    return np.zeros(n)
+        
+        # Solve both QPs
+        dq_right = _solve_arm_qp(right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
+                                 x_elbow_r, x_hand_r, self._osqp_prev_dq_right, 'right', Wc_primary)
+        self._osqp_prev_dq_right = dq_right.copy()
+        
+        dq_left = _solve_arm_qp(left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
+                                x_elbow_l, x_hand_l, self._osqp_prev_dq_left, 'left', Wc_secondary)
+        self._osqp_prev_dq_left = dq_left.copy()
+        
+        # Combine: right arm's base takes priority
+        dq_sol = np.zeros(DOF, dtype=np.float32)
+        dq_sol[:6] = dq_right[:6].astype(np.float32)
+        dq_sol[18:25] = dq_right[6:].astype(np.float32)
+        dq_sol[25:32] = dq_left[6:].astype(np.float32)
+        
+        q_des = self.q + dq_sol
+        dq_des = dq_sol
+        
+        return q_des, dq_des
+
+    def update_task_space_command_qp_proxqp(self,
+                                             x_elbow_l_des, x_elbow_r_des,
+                                             x_elbow_l, x_elbow_r,
+                                             x_hand_l_des, x_hand_r_des,
+                                             x_hand_l, x_hand_r,
+                                             J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
+                                             com_des):
+        """Solve IK using ProxQP (proxsuite) - proximal augmented Lagrangian method.
+        
+        ProxQP is designed for robotics QPs by INRIA. It handles near-infeasibility
+        gracefully, supports warm-starting, and is very fast for dense problems.
+        
+        ProxQP format:
+            min  0.5 * x^T H x + g^T x
+            s.t. A_eq x = b_eq           (equality constraints)
+                 l <= C x <= u           (inequality constraints)
+        
+        We map our problem as:
+            - No equality constraints
+            - C = [I; aT_cbf]  (box + CBF)
+            - l = [lb_box; b_cbf], u = [ub_box; +inf]
+        
+        Args:
+            All (6,) for positions, (6, DOF) for Jacobians
+        Returns:
+            q_des: (DOF,)
+            dq_des: (DOF,)
+        """
+        try:
+            import proxsuite
+        except ImportError:
+            print("Warning: proxsuite not installed. Install with: pip install proxsuite")
+            print("Falling back to OSQP.")
+            return self.update_task_space_command_qp(
+                x_elbow_l_des, x_elbow_r_des, x_elbow_l, x_elbow_r,
+                x_hand_l_des, x_hand_r_des, x_hand_l, x_hand_r,
+                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r, com_des)
+        
+        # =====================================================================
+        # Weights (same as OSQP version)
+        # =====================================================================
+        We = np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        Wc = np.eye(6, dtype=np.float64) * 5000
+        Wq = np.eye(DOF, dtype=np.float64) * 50
+        Wq[:6, :6] = 0
+        
+        # =====================================================================
+        # Current state and errors
+        # =====================================================================
+        q_fb = self.q.astype(np.float64)
+        e_elbow_l = (x_elbow_l_des - x_elbow_l).astype(np.float64)
+        e_elbow_r = (x_elbow_r_des - x_elbow_r).astype(np.float64)
+        e_hand_l = (x_hand_l_des - x_hand_l).astype(np.float64)
+        e_hand_r = (x_hand_r_des - x_hand_r).astype(np.float64)
+        e_com = (com_des - self.q[:6]).astype(np.float64)
+        
+        J_com = np.zeros((6, DOF), dtype=np.float64)
+        J_com[:, :6] = np.eye(6, dtype=np.float64)
+        
+        J_elbow_l = J_elbow_l.astype(np.float64)
+        J_elbow_r = J_elbow_r.astype(np.float64)
+        J_hand_l = J_hand_l.astype(np.float64)
+        J_hand_r = J_hand_r.astype(np.float64)
+        
+        # =====================================================================
+        # CBF constraints
+        # =====================================================================
+        com_offset = np.array([-0.1, 0.0, 0.0], dtype=np.float64)  # COM sphere at base position
+        d_elbow_com_l = x_elbow_l[3:] - q_fb[:3] - com_offset
+        d_elbow_com_r = x_elbow_r[3:] - q_fb[:3] - com_offset
+        d_hand_com_l = x_hand_l[3:] - q_fb[:3] - com_offset
+        d_hand_com_r = x_hand_r[3:] - q_fb[:3] - com_offset
+        
+        head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float64)
+        crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float64)
+        head_pos = q_fb[:3] + head_offset
+        crotch_pos = q_fb[:3] + crotch_offset
+        
+        d_elbow_head_l = x_elbow_l[3:] - head_pos
+        d_elbow_head_r = x_elbow_r[3:] - head_pos
+        d_hand_head_l = x_hand_l[3:] - head_pos
+        d_hand_head_r = x_hand_r[3:] - head_pos
+        
+        d_elbow_crotch_l = x_elbow_l[3:] - crotch_pos
+        d_elbow_crotch_r = x_elbow_r[3:] - crotch_pos
+        d_hand_crotch_l = x_hand_l[3:] - crotch_pos
+        d_hand_crotch_r = x_hand_r[3:] - crotch_pos
+        
+        r_torso, r_head, r_crotch = 0.13, 0.11, 0.16
+        safety_margin = 0.02
+        rho_torso = r_torso + safety_margin
+        rho_head = r_head + safety_margin
+        rho_crotch = r_crotch + safety_margin
+        
+        h_elbow_l_torso = np.linalg.norm(d_elbow_com_l)**2 - rho_torso**2
+        h_elbow_r_torso = np.linalg.norm(d_elbow_com_r)**2 - rho_torso**2
+        h_hand_l_torso = np.linalg.norm(d_hand_com_l)**2 - rho_torso**2
+        h_hand_r_torso = np.linalg.norm(d_hand_com_r)**2 - rho_torso**2
+        h_elbow_l_head = np.linalg.norm(d_elbow_head_l)**2 - rho_head**2
+        h_elbow_r_head = np.linalg.norm(d_elbow_head_r)**2 - rho_head**2
+        h_hand_l_head = np.linalg.norm(d_hand_head_l)**2 - rho_head**2
+        h_hand_r_head = np.linalg.norm(d_hand_head_r)**2 - rho_head**2
+        h_elbow_l_crotch = np.linalg.norm(d_elbow_crotch_l)**2 - rho_crotch**2
+        h_elbow_r_crotch = np.linalg.norm(d_elbow_crotch_r)**2 - rho_crotch**2
+        h_hand_l_crotch = np.linalg.norm(d_hand_crotch_l)**2 - rho_crotch**2
+        h_hand_r_crotch = np.linalg.norm(d_hand_crotch_r)**2 - rho_crotch**2
+        
+        # Featherstone: J[0:3,:]=angular, J[3:6,:]=linear. CBF uses linear rows.
+        aT_elbow_l_torso = 2*d_elbow_com_l.T @ (J_elbow_l[3:, :] - J_com[:3, :])
+        aT_elbow_r_torso = 2*d_elbow_com_r.T @ (J_elbow_r[3:, :] - J_com[:3, :])
+        aT_hand_l_torso = 2*d_hand_com_l.T @ (J_hand_l[3:, :] - J_com[:3, :])
+        aT_hand_r_torso = 2*d_hand_com_r.T @ (J_hand_r[3:, :] - J_com[:3, :])
+        aT_elbow_l_head = 2*d_elbow_head_l.T @ (J_elbow_l[3:, :] - J_com[:3, :])
+        aT_elbow_r_head = 2*d_elbow_head_r.T @ (J_elbow_r[3:, :] - J_com[:3, :])
+        aT_hand_l_head = 2*d_hand_head_l.T @ (J_hand_l[3:, :] - J_com[:3, :])
+        aT_hand_r_head = 2*d_hand_head_r.T @ (J_hand_r[3:, :] - J_com[:3, :])
+        aT_elbow_l_crotch = 2*d_elbow_crotch_l.T @ (J_elbow_l[3:, :] - J_com[:3, :])
+        aT_elbow_r_crotch = 2*d_elbow_crotch_r.T @ (J_elbow_r[3:, :] - J_com[:3, :])
+        aT_hand_l_crotch = 2*d_hand_crotch_l.T @ (J_hand_l[3:, :] - J_com[:3, :])
+        aT_hand_r_crotch = 2*d_hand_crotch_r.T @ (J_hand_r[3:, :] - J_com[:3, :])
+        
+        lambda_cbf = 0.5
+        
+        b_cbf = -lambda_cbf * np.array([
+            h_elbow_l_torso, h_elbow_r_torso, h_hand_l_torso, h_hand_r_torso,
+            h_elbow_l_head, h_elbow_r_head, h_hand_l_head, h_hand_r_head,
+            h_elbow_l_crotch, h_elbow_r_crotch, h_hand_l_crotch, h_hand_r_crotch
+        ], dtype=np.float64)
+        
+        aT_cbf = np.vstack([
+            aT_elbow_l_torso, aT_elbow_r_torso, aT_hand_l_torso, aT_hand_r_torso,
+            aT_elbow_l_head, aT_elbow_r_head, aT_hand_l_head, aT_hand_r_head,
+            aT_elbow_l_crotch, aT_elbow_r_crotch, aT_hand_l_crotch, aT_hand_r_crotch
+        ])  # (12, DOF)
+        
+        # =====================================================================
+        # Build QP cost: min 0.5 * dq^T H dq + g^T dq
+        # =====================================================================
+        H = np.zeros((DOF, DOF), dtype=np.float64)
+        H += J_elbow_l.T @ We @ J_elbow_l
+        H += J_elbow_r.T @ We @ J_elbow_r
+        H += J_hand_l.T @ Wh @ J_hand_l
+        H += J_hand_r.T @ Wh @ J_hand_r
+        H += J_com.T @ Wc @ J_com
+        H += Wq
+        H = 0.5 * (H + H.T)
+        H += np.eye(DOF) * 1e-6
+        
+        g = np.zeros(DOF, dtype=np.float64)
+        g -= J_elbow_l.T @ We @ e_elbow_l
+        g -= J_elbow_r.T @ We @ e_elbow_r
+        g -= J_hand_l.T @ Wh @ e_hand_l
+        g -= J_hand_r.T @ Wh @ e_hand_r
+        g -= J_com.T @ Wc @ e_com
+        
+        # =====================================================================
+        # Inequality constraints: l <= C @ dq <= u
+        # Row block 1: box constraints   I @ dq in [q_min - q, q_max - q]
+        # Row block 2: CBF constraints  aT @ dq in [b_cbf, +inf]
+        # =====================================================================
+        qj_min = q_min.astype(np.float64)
+        qj_max = q_max.astype(np.float64)
+        lb_box = qj_min - q_fb
+        ub_box = qj_max - q_fb
+        
+        n_cbf = aT_cbf.shape[0]  # 12
+        
+        C = np.vstack([np.eye(DOF, dtype=np.float64), aT_cbf])  # (DOF+12, DOF)
+        l = np.concatenate([lb_box, b_cbf])                      # (DOF+12,)
+        u = np.concatenate([ub_box, np.full(n_cbf, 1e30)])       # (DOF+12,)
+        
+        n_ineq = C.shape[0]
+        
+        # =====================================================================
+        # Solve with ProxQP (dense backend)
+        # =====================================================================
+        try:
+            if self._proxqp_solver is None or self._proxqp_solver.model.dim != DOF:
+                # First call: create solver
+                self._proxqp_solver = proxsuite.proxqp.dense.QP(
+                    n=DOF,       # number of variables
+                    n_eq=0,      # no equality constraints
+                    n_in=n_ineq  # inequality constraints
+                )
+                # Configure for real-time performance
+                self._proxqp_solver.settings.eps_abs = 1e-4
+                self._proxqp_solver.settings.eps_rel = 0.0
+                self._proxqp_solver.settings.max_iter = 100
+                self._proxqp_solver.settings.verbose = False
+                self._proxqp_solver.settings.initial_guess = (
+                    proxsuite.proxqp.InitialGuess.WARM_START_WITH_PREVIOUS_RESULT
+                )
+                
+                # Init (no equality constraints → pass None for A, b)
+                self._proxqp_solver.init(
+                    H=H, g=g,
+                    A=None, b=None,
+                    C=C, l=l, u=u
+                )
+                self._proxqp_solver.solve()
+            else:
+                # Subsequent calls: update problem data and warm-start solve
+                self._proxqp_solver.update(
+                    H=H, g=g,
+                    A=None, b=None,
+                    C=C, l=l, u=u
+                )
+                self._proxqp_solver.solve()
+            
+            dq_sol = self._proxqp_solver.results.x.astype(np.float32)
+            self._proxqp_prev_dq = self._proxqp_solver.results.x.copy()
+            
+        except Exception as e:
+            print(f"[ProxQP] Error: {e}, falling back to unconstrained")
+            try:
+                dq_sol = np.linalg.solve(H, -g).astype(np.float32)
+            except:
+                dq_sol = np.zeros(DOF, dtype=np.float32)
+        
+        q_des = self.q + dq_sol
+        dq_des = dq_sol
         
         return q_des, dq_des

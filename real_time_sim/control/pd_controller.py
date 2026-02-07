@@ -44,11 +44,15 @@ class PDController:
         self.kp[12:19] = self.ctrl_config.arm_gains[0]
         self.kd[12:19] = self.ctrl_config.arm_gains[1]
         self.torque_limits[12:19] = self.ctrl_config.arm_torque_limit
+        self.kp[19] = self.ctrl_config.arm_gains[0]*0
+        self.kd[19] = self.ctrl_config.arm_gains[1]*0
         
         # Left arm (19-25)
         self.kp[19:26] = self.ctrl_config.arm_gains[0]
         self.kd[19:26] = self.ctrl_config.arm_gains[1]
         self.torque_limits[19:26] = self.ctrl_config.arm_torque_limit
+        self.kp[26] = self.ctrl_config.arm_gains[0]*0
+        self.kd[26] = self.ctrl_config.arm_gains[1]*0
         
         # Head (26-27)
         self.kp[26:28] = self.ctrl_config.head_gains[0]
@@ -86,7 +90,7 @@ class PDController:
         q_error = q_des - q
         
         # Handle angle wrapping for error (keep error in [-pi, pi])
-        q_error = np.arctan2(np.sin(q_error), np.cos(q_error))
+        # q_error = np.arctan2(np.sin(q_error), np.cos(q_error))
         
         # Velocity error
         dq_error = dq_des - dq

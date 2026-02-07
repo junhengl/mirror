@@ -87,7 +87,21 @@ class ControllerNode:
                 q_des,
                 dq_des
             )
-            
+
+            # # test torque commands:
+            # torques = np.array([
+            #     0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # right leg
+            #     0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # left leg
+            #     0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0,  # right arm
+            #     0, -0.0, 0.0, -0.0, 0.0, -0.0, 10.0,  # left arm
+            #     0.0, 0.0  # head
+            # ])
+
+            torques[18] = 0.0  # Disable right wrist for testing
+            torques[25] = 0.0  # Disable left wrist for testing
+            # torques[14] *= -1.0
+
+
             # Publish torque command
             self.shared.set_torque_command(torques, time.time())
             

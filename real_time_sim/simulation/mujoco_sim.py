@@ -72,18 +72,24 @@ class MuJoCoSimulation:
         self.running = False
         self.paused = False
         
-        # Fixed base configuration (robot hangs at this height)
-        self.fix_base = True
-        self.fixed_base_pos = np.array([0.0, 0.0, self.sim_config.base_height])  # Hanging height from config
-        self.fixed_base_quat = np.array([1.0, 0.0, 0.0, 0.0])  # Upright
+        # Base height for the welded base (no freejoint).
+        # The base body is welded to the world; we set its position via model.body_pos.
+        self._base_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'BASE_LINK')
+        self.set_base_height(self.sim_config.base_height)
         
         # Build joint mapping
         self._build_joint_map()
         
-        # Initialize robot pose (uses fixed_base_pos)
+        # Initialize robot pose
         self._initialize_robot()
         
         print(f"[Simulation] Initialized with dt={self.sim_config.sim_dt}s ({1/self.sim_config.sim_dt:.0f}Hz)")
+    
+    def set_base_height(self, height: float):
+        """Set the height of the welded base body."""
+        self.model.body_pos[self._base_body_id] = [0.0, 0.0, height]
+        # Forward kinematics so xpos etc. are updated
+        mujoco.mj_forward(self.model, self.data)
     
     def _build_joint_map(self):
         """Build mapping from joint names to indices."""
@@ -103,13 +109,12 @@ class MuJoCoSimulation:
         print(f"[Simulation] {len(self.joint_map)} joints, {len(self.actuator_map)} actuators")
     
     def _initialize_robot(self):
-        """Initialize robot to hanging pose at configured height."""
-        # Set base position (hanging height from config)
-        self.data.qpos[0:3] = self.fixed_base_pos.copy()  # Use configured height
-        self.data.qpos[3:7] = self.fixed_base_quat.copy()  # Upright orientation
+        """Initialize robot to default pose.
         
-        # Set joint angles to default standing pose
-        # qpos layout: [base_pos(3), base_quat(4), joints(28)]
+        With the freejoint removed, qpos is just the 28 hinge joints
+        and qvel is also 28. No base DOFs in qpos/qvel.
+        """
+        # qpos layout (welded base): [joints(28)] — no base DOFs
         default_joints = np.array([
             # Right leg
             0.0, 0.0, -0.1, 0.2, -0.1, 0.0,
@@ -123,12 +128,9 @@ class MuJoCoSimulation:
             0.0, 0.0
         ], dtype=np.float64)
         
-        self.data.qpos[7:7+28] = default_joints
-        
-        # Zero velocities
+        self.data.qpos[0:28] = default_joints
         self.data.qvel[:] = 0.0
         
-        # Forward kinematics to update positions
         mujoco.mj_forward(self.model, self.data)
         
     def set_torques(self, torques: np.ndarray):
@@ -156,17 +158,17 @@ class MuJoCoSimulation:
         feedback = RobotFeedback()
         feedback.timestamp = time.time()
         
-        # Base pose
-        feedback.base_pos = self.data.qpos[0:3].copy()
-        feedback.base_quat = self.data.qpos[3:7].copy()
+        # Base pose (from body xpos/xquat since base is welded)
+        feedback.base_pos = self.data.xpos[self._base_body_id].copy()
+        feedback.base_quat = self.data.xquat[self._base_body_id].copy()
         
-        # Base velocity (from qvel)
-        # qvel layout: [base_ang_vel(3), base_lin_vel(3), joint_vel(28)]
-        feedback.base_vel = self.data.qvel[0:6].copy()
+        # Base velocity is zero (welded base)
+        feedback.base_vel = np.zeros(6, dtype=np.float64)
         
         # Joint positions and velocities
-        feedback.q = self.data.qpos[7:7+28].copy()
-        feedback.dq = self.data.qvel[6:6+28].copy()
+        # Welded base: qpos/qvel are just the 28 hinge joints, no base prefix
+        feedback.q = self.data.qpos[0:28].copy()
+        feedback.dq = self.data.qvel[0:28].copy()
         
         # COM position and velocity
         # MuJoCo stores subtree COM in model coordinates
@@ -326,20 +328,8 @@ class MuJoCoSimulation:
         torques, cmd_time = self.shared.get_torque_command()
         self.set_torques(torques)
         
-        # Fix base position if enabled (robot hanging)
-        if self.fix_base:
-            self.data.qpos[0:3] = self.fixed_base_pos
-            self.data.qpos[3:7] = self.fixed_base_quat
-            self.data.qvel[0:6] = 0.0  # Zero base velocity
-        
-        # Step simulation
+        # Step simulation (welded base = no dynamic coupling through floating base)
         mujoco.mj_step(self.model, self.data)
-        
-        # Re-fix base after step (to counteract any forces)
-        if self.fix_base:
-            self.data.qpos[0:3] = self.fixed_base_pos
-            self.data.qpos[3:7] = self.fixed_base_quat
-            self.data.qvel[0:6] = 0.0
         
         self.sim_time += self.sim_config.sim_dt
         self.step_count += 1

@@ -436,8 +436,8 @@ class KinematicRetargeter:
         
         # Output smoothing filter
         self.filtered_q = self.q.copy()  # Filtered joint angles for output
-        self.filter_alpha = 0.2  # Low-pass filter coefficient (0-1, lower = smoother)
-        self.max_joint_delta = 1  # Maximum allowed joint change per step (radians)
+        self.filter_alpha = .5  # Low-pass filter coefficient (0-1, lower = smoother)
+        self.max_joint_delta = 10  # Maximum allowed joint change per step (radians)
         
         # IK initialization mode: 'warm_start', 'random', or 'default_pose'
         self.init_mode = 'warm_start'  # Options: 'warm_start', 'random', 'default_pose'

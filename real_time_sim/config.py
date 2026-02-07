@@ -27,8 +27,8 @@ class ControlConfig:
     
     # PD gains per joint group [kp, kd]
     # Lower Kp and HIGHER Kd for stability when hanging (damping is critical!)
-    leg_gains: np.ndarray = field(default_factory=lambda: np.array([50.0, 1.0]))  # [kp, kd]
-    arm_gains: np.ndarray = field(default_factory=lambda: np.array([70.0, 2.0]))
+    leg_gains: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0]))  # [kp, kd]
+    arm_gains: np.ndarray = field(default_factory=lambda: np.array([70.0, 1.0]))
     head_gains: np.ndarray = field(default_factory=lambda: np.array([10.0, 1.0]))
     
     # Torque limits (Nm)

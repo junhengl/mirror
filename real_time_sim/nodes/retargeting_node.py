@@ -46,10 +46,10 @@ class RetargetingNode:
         self.robot = Robot()
         
         # Robot dimensions
-        self.hand_r_offset = themis_const.hand_r
-        self.hand_l_offset = themis_const.hand_l
-        self.elbow_r_offset = np.array([0.0, -0.16, 0.0], dtype=np.float64)
-        self.elbow_l_offset = np.array([0.0, 0.16, 0.0], dtype=np.float64)
+        self.hand_r_offset = np.array([0.0, -0.08, 0.0], dtype=np.float64)
+        self.hand_l_offset = np.array([0.0, 0.08, 0.0], dtype=np.float64)
+        self.elbow_r_offset = np.array([0.0, -0.0, 0.0], dtype=np.float64)
+        self.elbow_l_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         
         # Transform matrices
         self.Xhand_l = Xtrans(self.hand_l_offset)
@@ -60,8 +60,8 @@ class RetargetingNode:
         # Link indices
         self.hand_r_link = 22
         self.hand_l_link = 29
-        self.elbow_r_link = 20
-        self.elbow_l_link = 27
+        self.elbow_r_link = 21
+        self.elbow_l_link = 28
         
         # Current IK state
         self.q = np.zeros(themis_const.DOF, dtype=np.float64)
@@ -203,10 +203,19 @@ class RetargetingNode:
         q_current[6:6+28] = feedback.q
         dq_current = np.zeros(self.themis_const.DOF, dtype=np.float64)
         dq_current[6:6+28] = feedback.dq
+
+        q_offset = np.array([
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # floating base
+            0.0, 0.0, -0.1, 0.1, -0.1, 0.0,  # right leg
+            0.0, 0.0, -0.1, 0.1, -0.1, 0.0,  # left leg
+            0, 0.1, 0, 0.1, 0.0, 0.1, 0,  # right arm
+            0, -0.1, 0, -0.1, 0.0, -0.1, 0,  # left arm
+            0.0, 0.0  # head
+        ], dtype=np.float32)
         
         # IK iterations
         for _ in range(self.retarget_config.num_ik_iterations):
-            self.robot.update(q_current, dq_current)
+            self.robot.update(q_current+q_offset*0.00, dq_current)
             
             # Compute FK
             x_hand_r, _ = self.robot.compute_forward_kinematics(self.hand_r_link, self.hand_r_offset)
@@ -220,8 +229,8 @@ class RetargetingNode:
             J_elbow_r = self.robot.compute_body_jacobian(self.elbow_r_link, self.Xelbow_r)
             J_elbow_l = self.robot.compute_body_jacobian(self.elbow_l_link, self.Xelbow_l)
             
-            # Solve IK step (QP solver)
-            q_des, dq_des = self.robot.update_task_space_command_qp(
+            # Solve IK step (QP solver: distributed ProxQP)
+            q_des, dq_des = self.robot.update_task_space_command_qp_distributed(
                 desired['x_elbow_l_des'], desired['x_elbow_r_des'],
                 x_elbow_l, x_elbow_r,
                 desired['x_hand_l_des'], desired['x_hand_r_des'],
@@ -229,7 +238,7 @@ class RetargetingNode:
                 J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
                 self.com_des
             )
-            
+
             q_current = q_des.copy()
             dq_current = dq_des.copy()
         
@@ -261,6 +270,11 @@ class RetargetingNode:
         output.valid = True
         output.q_des = self.filtered_q[6:6+28].copy()
         output.dq_des = dq_current[6:6+28].copy()
+
+        # output.q_des[14] *=-1.0  
+        # output.dq_des[14] *=-1.0
+        # print all the desired joint angles for debugging
+        # print(f"Desired joint angles (degrees): {np.degrees(output.q_des)}  (shoulder_pitch_r={np.degrees(output.q_des[12]):.1f}, shoulder_roll_r={np.degrees(output.q_des[13]):.1f}, shoulder_yaw_r={np.degrees(output.q_des[14]):.1f}, elbow_pitch_r={np.degrees(output.q_des[15]):.1f}, elbow_yaw_r={np.degrees(output.q_des[16]):.1f}, wrist_pitch_r={np.degrees(output.q_des[17]):.1f}, wrist_yaw_r={np.degrees(output.q_des[18]):.1f}, shoulder_pitch_l={np.degrees(output.q_des[19]):.1f}, shoulder_roll_l={np.degrees(output.q_des[20]):.1f}, shoulder_yaw_l={np.degrees(output.q_des[21]):.1f}, elbow_pitch_l={np.degrees(output.q_des[22]):.1f}, elbow_yaw_l={np.degrees(output.q_des[23]):.1f}, wrist_pitch_l={np.degrees(output.q_des[24]):.1f}, wrist_yaw_l={np.degrees(output.q_des[25]):.1f})")
         
         # Task space targets for visualization (with base height offset)
         base_offset = np.array([0.0, 0.0, self.base_height])

@@ -310,8 +310,8 @@ contact_r = np.array([0.035, 0.0, 0.08], dtype=np.float32)  # Approximate center
 contact_l = np.array([0.035, 0.0, 0.08], dtype=np.float32)  # Approximate center
 
 # Hand/wrist end effector offsets
-hand_r = np.array([0.0, -0.08, 0.0], dtype=np.float32)  # At wrist
-hand_l = np.array([0.0, 0.08, 0.0], dtype=np.float32)  # At wrist
+hand_r = np.array([0.0, -0.008, 0.0], dtype=np.float32)  # At wrist
+hand_l = np.array([0.0, 0.008, 0.0], dtype=np.float32)  # At wrist
 
 # Link indices (for reference)
 # Useful for forward kinematics calculations

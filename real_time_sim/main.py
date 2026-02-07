@@ -96,8 +96,8 @@ def main():
     simulation = MuJoCoSimulation(config, shared, model_path)
     simulation.render_enabled = not args.no_render
     
-    # Set hanging height
-    simulation.fixed_base_pos[2] = args.hang_height
+    # Set hanging height (modifies the welded base body position)
+    simulation.set_base_height(args.hang_height)
     print(f"[Main] Robot hanging at height: {args.hang_height}m")
     
     controller = ControllerNode(config, shared)
@@ -163,13 +163,19 @@ def main():
             loop_start = time.perf_counter()
             simulation.step()
             
-            # Update markers from retargeting output and MuJoCo state
+            # Update markers from retargeting output and IK solver state
             retarget = shared.get_retarget_output()
             
-            # Always get actual positions from MuJoCo (even without valid tracking)
-            actual = simulation.get_body_positions()
+            # Get actual positions from IK solver's forward kinematics (not welded body frames)
+            # This shows the dynamic IK solver positions, not static body attachments
+            actual = {
+                'hand_l': retarget.hand_l_act,
+                'hand_r': retarget.hand_r_act,
+                'elbow_l': retarget.elbow_l_act,
+                'elbow_r': retarget.elbow_r_act,
+            }
             
-            # Build desired dict - use retargeting if valid, otherwise show default pose targets
+            # Build desired dict - use retargeting targets from ZED tracking
             if retarget.valid:
                 desired = {
                     'hand_l': retarget.hand_l_des,
