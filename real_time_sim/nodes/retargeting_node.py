@@ -46,8 +46,8 @@ class RetargetingNode:
         self.robot = Robot()
         
         # Robot dimensions
-        self.hand_r_offset = np.array([0.0, -0.08, 0.0], dtype=np.float64)
-        self.hand_l_offset = np.array([0.0, 0.08, 0.0], dtype=np.float64)
+        self.hand_r_offset = np.array([0.0, -0.008, 0.0], dtype=np.float64)
+        self.hand_l_offset = np.array([0.0, 0.008, 0.0], dtype=np.float64)
         self.elbow_r_offset = np.array([0.0, -0.0, 0.0], dtype=np.float64)
         self.elbow_l_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         
@@ -158,14 +158,83 @@ class RetargetingNode:
         # Scale to robot dimensions
         scale = self.retarget_config.arm_scale
         
-        # Build desired task-space vectors [orientation(3), position(3)]
-        zero_orient = np.zeros(3, dtype=np.float64)
+        # Compute hand orientations from elbow→hand direction vectors
+        # (relative to body frame, where neck = identity rotation)
+        # 
+        # Build rotation matrix:
+        #   Z-axis = arm direction (elbow → hand)
+        #   X-axis = perpendicular to arm (via cross product with world up)
+        #   Y-axis = perpendicular to both X and Z
+        # Then convert to RPY using robot's ZYX Euler convention.
+        #
+        def direction_to_rotation(elbow, hand):
+            """Build a 3x3 rotation matrix whose Z-axis points along
+            the elbow→hand direction. Convert to RPY matching robot FK convention."""
+            d = hand - elbow
+            norm = np.linalg.norm(d)
+            if norm < 1e-6:
+                return np.eye(3, dtype=np.float64), np.zeros(3, dtype=np.float64)
+            
+            z_axis = d / norm  # Z-axis points along arm direction
+            
+            # Choose a "world up" hint to avoid singularity when arm is vertical
+            up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            if abs(np.dot(z_axis, up)) > 0.95:
+                # Arm nearly vertical — use world-forward as fallback hint
+                up = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            
+            # X-axis: perpendicular to arm, in plane of (up × arm)
+            x_axis = np.cross(up, z_axis)
+            x_norm = np.linalg.norm(x_axis)
+            if x_norm < 1e-8:
+                # Degenerate — use different hint
+                up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                x_axis = np.cross(up, z_axis)
+                x_norm = np.linalg.norm(x_axis)
+            x_axis /= x_norm
+            
+            # Y-axis: complete the right-handed frame
+            y_axis = np.cross(z_axis, x_axis)
+            # y_axis is already unit (cross of two orthonormal vectors)
+            
+            # R columns = [x_axis, y_axis, z_axis]
+            R = np.column_stack([x_axis, y_axis, z_axis])
+            
+            # Extract RPY using robot's ZYX convention (rpy_from_rot_zyx):
+            #   R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+            sy = -R[2, 0]
+            cy = np.sqrt(R[0, 0]**2 + R[1, 0]**2)
+            pitch = np.arctan2(sy, cy)
+            
+            if cy > 1e-6:
+                yaw  = np.arctan2(R[1, 0], R[0, 0])
+                roll = np.arctan2(R[2, 1], R[2, 2])
+            else:
+                # Gimbal lock: pitch ≈ ±π/2, fix roll=0 and absorb into yaw
+                yaw  = np.arctan2(-R[0, 1], R[1, 1])
+                roll = 0.0
+            
+            rpy = np.array([roll, pitch, yaw], dtype=np.float64)
+            return R, rpy
         
+        # Orientations (using scaled positions for consistency)
+        # Camera right → robot left, camera left → robot right
+        hand_l_mat, hand_l_rpy = direction_to_rotation(
+            right_elbow_robot * scale, right_wrist_robot * scale)
+        hand_r_mat, hand_r_rpy = direction_to_rotation(
+            left_elbow_robot * scale, left_wrist_robot * scale)
+        
+        print(f"[Retargeting] Transformed ZED to robot frame: hand_l_rpy={np.degrees(hand_l_rpy)}, hand_r_rpy={np.degrees(hand_r_rpy)}")
+        
+        # Build desired task-space vectors [orientation(3), position(3)]
         return {
-            'x_hand_l_des': np.concatenate([zero_orient, right_wrist_robot * scale]),    # camera right → robot left
-            'x_hand_r_des': np.concatenate([zero_orient, left_wrist_robot * scale]),     # camera left → robot right
-            'x_elbow_l_des': np.concatenate([zero_orient, right_elbow_robot * scale]),   # camera right → robot left
-            'x_elbow_r_des': np.concatenate([zero_orient, left_elbow_robot * scale])     # camera left → robot right
+            'x_hand_l_des': np.concatenate([hand_l_rpy, right_wrist_robot * scale]),    # camera right → robot left
+            'x_hand_r_des': np.concatenate([hand_r_rpy, left_wrist_robot * scale]),     # camera left → robot right
+            'x_elbow_l_des': np.concatenate([np.zeros(3, dtype=np.float64), right_elbow_robot * scale]),   # camera right → robot left
+            'x_elbow_r_des': np.concatenate([np.zeros(3, dtype=np.float64), left_elbow_robot * scale]),    # camera left → robot right
+            # Rotation matrices for visualization (3x3)
+            'hand_l_orient_mat': hand_l_mat,
+            'hand_r_orient_mat': hand_r_mat,
         }
     
     def _solve_ik(self, tracking: ArmTrackingData, feedback) -> RetargetingOutput:
@@ -312,6 +381,10 @@ class RetargetingNode:
         output.hand_r_des = desired['x_hand_r_des'][3:6] + base_offset
         output.elbow_l_des = desired['x_elbow_l_des'][3:6] + base_offset
         output.elbow_r_des = desired['x_elbow_r_des'][3:6] + base_offset
+        
+        # Hand orientation matrices for arrow visualization
+        output.hand_l_orient_mat = desired['hand_l_orient_mat']
+        output.hand_r_orient_mat = desired['hand_r_orient_mat']
         
         # Actual FK positions (with base offset)
         output.hand_l_act = x_hand_l_act[3:6] + base_offset

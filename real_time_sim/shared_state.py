@@ -77,6 +77,10 @@ class RetargetingOutput:
     elbow_l_act: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
     elbow_r_act: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
     
+    # Hand orientation matrices (3x3 rotation, Z-axis = elbow→hand direction)
+    hand_l_orient_mat: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float64))
+    hand_r_orient_mat: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float64))
+    
     def copy(self) -> 'RetargetingOutput':
         """Create a deep copy."""
         return RetargetingOutput(
@@ -92,6 +96,8 @@ class RetargetingOutput:
             hand_r_act=self.hand_r_act.copy(),
             elbow_l_act=self.elbow_l_act.copy(),
             elbow_r_act=self.elbow_r_act.copy(),
+            hand_l_orient_mat=self.hand_l_orient_mat.copy(),
+            hand_r_orient_mat=self.hand_r_orient_mat.copy(),
         )
 
 

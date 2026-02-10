@@ -252,8 +252,8 @@ class BodyTrackingNode:
         kp = body.keypoint
         conf = body.keypoint_confidence
         
-        # BODY_38 indices: NECK=3, L_ELBOW=14, L_WRIST=34
-        # R_ELBOW=15, R_WRIST=35
+        # BODY_38 indices: NECK=3, L_ELBOW=14, L_HAND=16
+        # R_ELBOW=15, R_HAND=17
         # See https://www.stereolabs.com/docs/body-tracking for full skeleton
         
         # Helper: safely extract keypoint position (NaN → zeros)
@@ -273,9 +273,9 @@ class BodyTrackingNode:
         
         # Get world positions (safe extraction)
         left_elbow_world, le_ok = _safe_kp(14)
-        left_wrist_world, lw_ok = _safe_kp(34)
+        left_wrist_world, lw_ok = _safe_kp(16)
         right_elbow_world, re_ok = _safe_kp(15)
-        right_wrist_world, rw_ok = _safe_kp(35)
+        right_wrist_world, rw_ok = _safe_kp(17)
         
         # Convert to local body frame
         left_elbow_local = left_elbow_world - body_com
@@ -285,8 +285,8 @@ class BodyTrackingNode:
         
         # Check confidences AND position validity
         min_conf = self.track_config.min_confidence
-        left_valid = le_ok and lw_ok and min(conf[3], conf[14], conf[34]) > min_conf
-        right_valid = re_ok and rw_ok and min(conf[3], conf[15], conf[35]) > min_conf
+        left_valid = le_ok and lw_ok and min(conf[3], conf[14], conf[16]) > min_conf
+        right_valid = re_ok and rw_ok and min(conf[3], conf[15], conf[17]) > min_conf
         
         # Apply filters (update all filters even if not all are used)
         # Shoulder placeholders (not used in BODY_38 tracking)
@@ -310,11 +310,11 @@ class BodyTrackingNode:
             left_shoulder=left_shoulder_filtered,
             left_elbow=left_elbow_filtered,
             left_wrist=left_wrist_filtered,
-            left_confidence=min(_safe_conf(14), _safe_conf(34)),
+            left_confidence=min(_safe_conf(14), _safe_conf(16)),
             right_shoulder=right_shoulder_filtered,
             right_elbow=right_elbow_filtered,
             right_wrist=right_wrist_filtered,
-            right_confidence=min(_safe_conf(15), _safe_conf(35)),
+            right_confidence=min(_safe_conf(15), _safe_conf(17)),
         )
     
     def _dummy_tracking_loop(self):

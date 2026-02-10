@@ -60,6 +60,8 @@ class MuJoCoSimulation:
             'hand_r_act': np.zeros(3),
             'elbow_l_act': np.zeros(3),
             'elbow_r_act': np.zeros(3),
+            'hand_l_orient_mat': np.eye(3),
+            'hand_r_orient_mat': np.eye(3),
         }
         self.markers_lock = threading.Lock()
         
@@ -210,6 +212,10 @@ class MuJoCoSimulation:
                     self.markers[f'{key}_des'] = desired[key].copy()
                 if key in actual:
                     self.markers[f'{key}_act'] = actual[key].copy()
+            # Orientation matrices for hand arrows
+            for key in ['hand_l_orient_mat', 'hand_r_orient_mat']:
+                if key in desired:
+                    self.markers[key] = desired[key].copy()
     
     def _render_markers(self):
         """Render marker spheres and CBF safety sphere in viewer."""
@@ -276,34 +282,74 @@ class MuJoCoSimulation:
                 ngeom += 1
             
             # Desired markers (increased contrast: LEFT brighter, RIGHT slightly cooler)
-            colors_des = {
-                'hand_l_des': [1.00, 0.08, 0.18, 1.00],  # Very bright red (LEFT)
-                'hand_r_des': [0.08, 0.55, 1.00, 1.00],  # Bright cyan-blue (RIGHT)
-                'elbow_l_des': [1.00, 0.18, 0.28, 1.00],  # Bright pinkish (LEFT)
-                'elbow_r_des': [0.18, 0.72, 1.00, 1.00],  # Bright light blue (RIGHT)
-            }
-
             # Actual markers (distinct but slightly muted relative to desired)
-            colors_act = {
-                'hand_l_act': [0.85, 0.06, 0.12, 0.90],  # Muted-but-warm red (LEFT)
-                'hand_r_act': [0.06, 0.40, 0.72, 0.90],  # Muted blue (RIGHT)
-                'elbow_l_act': [0.90, 0.12, 0.18, 0.90],  # Muted pink (LEFT)
-                'elbow_r_act': [0.14, 0.58, 0.82, 0.90],  # Muted light blue (RIGHT)
+            
+            # ── Render desired HAND markers as orientation arrows ────────
+            arrow_length = 0.15   # total arrow length (m)
+            arrow_radius = 0.012  # shaft radius
+            cone_radius = 0.03   # arrowhead radius
+            cone_length = 0.05   # arrowhead length
+            shaft_length = arrow_length - cone_length
+            
+            hand_arrow_defs = {
+                'hand_l_des': ('hand_l_orient_mat', [1.00, 0.08, 0.18, 1.00]),
+                'hand_r_des': ('hand_r_orient_mat', [0.08, 0.55, 1.00, 1.00]),
             }
             
-            # Render desired markers (larger)
-            for key, color in colors_des.items():
+            for key, (mat_key, color) in hand_arrow_defs.items():
+                pos = markers.get(key, np.zeros(3))
+                orient_mat = markers.get(mat_key, np.eye(3))
+                if np.any(pos != 0) and ngeom + 1 < self.viewer.user_scn.maxgeom:
+                    # Z-axis of orient_mat is the arm/arrow direction
+                    arm_dir = orient_mat[:, 2]
+                    
+                    # MuJoCo cylinder Z-axis = length axis, so we can use the matrix directly
+                    # just need to ensure the matrix is properly formatted
+                    
+                    # Shaft (cylinder): starts at hand pos, extends along arm_dir
+                    shaft_center = pos + arm_dir * (shaft_length * 0.5)
+                    g = self.viewer.user_scn.geoms[ngeom]
+                    g.type = mujoco.mjtGeom.mjGEOM_CYLINDER
+                    g.size[:] = [arrow_radius, shaft_length * 0.5, 0]
+                    g.pos[:] = shaft_center
+                    g.mat[:] = orient_mat
+                    g.rgba[:] = color
+                    ngeom += 1
+                    
+                    # Arrowhead (wider cylinder): at tip of shaft
+                    cone_base = pos + arm_dir * shaft_length
+                    cone_center = cone_base + arm_dir * (cone_length * 0.5)
+                    g = self.viewer.user_scn.geoms[ngeom]
+                    g.type = mujoco.mjtGeom.mjGEOM_CYLINDER
+                    g.size[:] = [cone_radius, cone_length * 0.5, 0]
+                    g.pos[:] = cone_center
+                    g.mat[:] = orient_mat
+                    g.rgba[:] = color
+                    ngeom += 1
+            
+            # ── Render desired ELBOW markers as spheres ──────────────────
+            elbow_colors_des = {
+                'elbow_l_des': [1.00, 0.18, 0.28, 1.00],
+                'elbow_r_des': [0.18, 0.72, 1.00, 1.00],
+            }
+            for key, color in elbow_colors_des.items():
                 pos = markers.get(key, np.zeros(3))
                 if np.any(pos != 0) and ngeom < self.viewer.user_scn.maxgeom:
                     g = self.viewer.user_scn.geoms[ngeom]
                     g.type = mujoco.mjtGeom.mjGEOM_SPHERE
-                    g.size[:] = [0.05, 0.05, 0.05]  # 5cm spheres
+                    g.size[:] = [0.05, 0.05, 0.05]
                     g.pos[:] = pos
                     g.mat[:] = np.eye(3)
                     g.rgba[:] = color
                     ngeom += 1
             
-            # Render actual markers (slightly smaller)
+            # Render actual markers (slightly smaller spheres)
+            colors_act = {
+                'hand_l_act': [0.85, 0.06, 0.12, 0.90],
+                'hand_r_act': [0.06, 0.40, 0.72, 0.90],
+                'elbow_l_act': [0.90, 0.12, 0.18, 0.90],
+                'elbow_r_act': [0.14, 0.58, 0.82, 0.90],
+            }
             for key, color in colors_act.items():
                 pos = markers.get(key, np.zeros(3))
                 if np.any(pos != 0) and ngeom < self.viewer.user_scn.maxgeom:

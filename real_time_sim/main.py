@@ -182,6 +182,8 @@ def main():
                     'hand_r': retarget.hand_r_des,
                     'elbow_l': retarget.elbow_l_des,
                     'elbow_r': retarget.elbow_r_des,
+                    'hand_l_orient_mat': retarget.hand_l_orient_mat,
+                    'hand_r_orient_mat': retarget.hand_r_orient_mat,
                 }
             else:
                 # No valid retargeting - show default pose end-effector positions as targets
