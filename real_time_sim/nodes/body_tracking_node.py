@@ -27,7 +27,8 @@ class PositionFilter:
         if not valid or np.any(np.isnan(value)):
             if self.last_valid is not None:
                 return self.last_valid.copy()
-            return value.copy()
+            # No previous valid data yet — return safe zeros instead of NaN
+            return np.zeros_like(value)
         
         if self.filtered is None:
             self.filtered = value.copy()
@@ -164,7 +165,7 @@ class BodyTrackingNode:
         body_params = sl.BodyTrackingParameters()
         body_params.enable_tracking = True
         body_params.enable_body_fitting = True
-        body_params.body_format = sl.BODY_FORMAT.BODY_18
+        body_params.body_format = sl.BODY_FORMAT.BODY_38
         body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
         
         status = self.zed.enable_body_tracking(body_params)
@@ -194,6 +195,7 @@ class BodyTrackingNode:
         image = sl.Mat()
         
         while self.running and not self.shared.is_shutdown_requested():
+            loop_start = time.time()
             if self.zed.grab() == sl.ERROR_CODE.SUCCESS:
                 # Get camera image
                 self.zed.retrieve_image(image, sl.VIEW.LEFT, sl.MEM.CPU, display_resolution)
@@ -204,7 +206,7 @@ class BodyTrackingNode:
                 # Display with skeleton overlay
                 image_ocv = image.get_data()
                 self.cv_viewer.render_2D(
-                    image_ocv, image_scale, bodies.body_list, True, sl.BODY_FORMAT.BODY_18
+                    image_ocv, image_scale, bodies.body_list, True, sl.BODY_FORMAT.BODY_38
                 )
                 self.cv2.imshow("ZED Body Tracking", image_ocv)
                 
@@ -228,7 +230,14 @@ class BodyTrackingNode:
                 key = self.cv2.waitKey(1)
                 if key == ord('q'):
                     self.shared.request_shutdown()
-        
+                # record loop duration
+                loop_dur = time.time() - loop_start
+                # publish last loop duration (seconds)
+                try:
+                    self.shared.set_loop_duration('tracking', loop_dur)
+                except Exception:
+                    pass
+
         image.free(sl.MEM.CPU)
         self.cv2.destroyAllWindows()
     
@@ -243,41 +252,56 @@ class BodyTrackingNode:
         kp = body.keypoint
         conf = body.keypoint_confidence
         
-        # BODY_18 indices: NECK=1, L_SHOULDER=2, L_ELBOW=3, L_WRIST=4
-        # R_SHOULDER=5, R_ELBOW=6, R_WRIST=7
+        # BODY_38 indices: NECK=3, L_ELBOW=14, L_WRIST=34
+        # R_ELBOW=15, R_WRIST=35
+        # See https://www.stereolabs.com/docs/body-tracking for full skeleton
+        
+        # Helper: safely extract keypoint position (NaN → zeros)
+        def _safe_kp(idx):
+            p = np.array([kp[idx][0], kp[idx][1], kp[idx][2]], dtype=np.float64)
+            if np.any(np.isnan(p)):
+                return np.zeros(3, dtype=np.float64), False
+            return p, True
         
         # Body COM (NECK) with offset
-        body_com = np.array([kp[1][0], kp[1][1], kp[1][2]], dtype=np.float64)
-        body_com += np.array([0.0, -0.15, 0.0])  # Offset down from neck
+        neck_pos, neck_ok = _safe_kp(3)
+        body_com = neck_pos + np.array([0.0, -0.15, 0.0]) if neck_ok else np.zeros(3, dtype=np.float64)
         
-        # Get world positions
-        left_shoulder_world = np.array([kp[2][0], kp[2][1], kp[2][2]], dtype=np.float64)
-        left_elbow_world = np.array([kp[3][0], kp[3][1], kp[3][2]], dtype=np.float64)
-        left_wrist_world = np.array([kp[4][0], kp[4][1], kp[4][2]], dtype=np.float64)
-        right_shoulder_world = np.array([kp[5][0], kp[5][1], kp[5][2]], dtype=np.float64)
-        right_elbow_world = np.array([kp[6][0], kp[6][1], kp[6][2]], dtype=np.float64)
-        right_wrist_world = np.array([kp[7][0], kp[7][1], kp[7][2]], dtype=np.float64)
+        if not neck_ok:
+            # Can't compute body frame without neck
+            return ArmTrackingData(timestamp=time.time(), valid=False)
+        
+        # Get world positions (safe extraction)
+        left_elbow_world, le_ok = _safe_kp(14)
+        left_wrist_world, lw_ok = _safe_kp(34)
+        right_elbow_world, re_ok = _safe_kp(15)
+        right_wrist_world, rw_ok = _safe_kp(35)
         
         # Convert to local body frame
-        left_shoulder_local = left_shoulder_world - body_com
         left_elbow_local = left_elbow_world - body_com
         left_wrist_local = left_wrist_world - body_com
-        right_shoulder_local = right_shoulder_world - body_com
         right_elbow_local = right_elbow_world - body_com
         right_wrist_local = right_wrist_world - body_com
         
-        # Check confidences
+        # Check confidences AND position validity
         min_conf = self.track_config.min_confidence
-        left_valid = min(conf[1], conf[2], conf[3], conf[4]) > min_conf
-        right_valid = min(conf[1], conf[5], conf[6], conf[7]) > min_conf
+        left_valid = le_ok and lw_ok and min(conf[3], conf[14], conf[34]) > min_conf
+        right_valid = re_ok and rw_ok and min(conf[3], conf[15], conf[35]) > min_conf
         
-        # Apply filters
-        left_shoulder_filtered = self.filters['left_shoulder'].update(left_shoulder_local, left_valid)
+        # Apply filters (update all filters even if not all are used)
+        # Shoulder placeholders (not used in BODY_38 tracking)
+        left_shoulder_filtered = self.filters['left_shoulder'].update(np.zeros(3, dtype=np.float64), False)
+        right_shoulder_filtered = self.filters['right_shoulder'].update(np.zeros(3, dtype=np.float64), False)
+        # Actual tracking
         left_elbow_filtered = self.filters['left_elbow'].update(left_elbow_local, left_valid)
         left_wrist_filtered = self.filters['left_wrist'].update(left_wrist_local, left_valid)
-        right_shoulder_filtered = self.filters['right_shoulder'].update(right_shoulder_local, right_valid)
         right_elbow_filtered = self.filters['right_elbow'].update(right_elbow_local, right_valid)
         right_wrist_filtered = self.filters['right_wrist'].update(right_wrist_local, right_valid)
+        
+        # Safe confidence extraction (NaN confidence → 0)
+        def _safe_conf(idx):
+            c = float(conf[idx])
+            return c if not np.isnan(c) else 0.0
         
         return ArmTrackingData(
             timestamp=time.time(),
@@ -286,11 +310,11 @@ class BodyTrackingNode:
             left_shoulder=left_shoulder_filtered,
             left_elbow=left_elbow_filtered,
             left_wrist=left_wrist_filtered,
-            left_confidence=min(conf[2], conf[3], conf[4]),
+            left_confidence=min(_safe_conf(14), _safe_conf(34)),
             right_shoulder=right_shoulder_filtered,
             right_elbow=right_elbow_filtered,
             right_wrist=right_wrist_filtered,
-            right_confidence=min(conf[5], conf[6], conf[7]),
+            right_confidence=min(_safe_conf(15), _safe_conf(35)),
         )
     
     def _dummy_tracking_loop(self):
@@ -299,35 +323,36 @@ class BodyTrackingNode:
         t_start = time.time()
         
         while self.running and not self.shared.is_shutdown_requested():
+            loop_start = time.time()
             t = time.time() - t_start
             
-            # Simulate arm movement
+            # Simulate arm movement in standard XYZ frame (X forward, Y left, Z up)
             arm_data = ArmTrackingData(
                 timestamp=time.time(),
                 valid=True,
-                body_com=np.array([0.0, 1.0, 2.0], dtype=np.float64),
-                left_shoulder=np.array([0.0, 0.2, 0.0], dtype=np.float64),
+                body_com=np.array([2.0, 0.0, 1.0], dtype=np.float64),  # Transformed from [0,1,2]
+                left_shoulder=np.array([0.0, 0.0, 0.2], dtype=np.float64),  # Transformed from [0,0.2,0]
                 left_elbow=np.array([
-                    -0.15 + 0.15*np.sin(t),
-                    0.35 + 0.1*np.sin(t*0.7),
-                    0.1*np.cos(t)
+                    -0.35 - 0.1*np.sin(t*0.7),  # Y -> Z
+                    -0.15 + 0.15*np.sin(t),  # -X -> Y
+                    0.1*np.cos(t)  # Z -> X
                 ], dtype=np.float64),
                 left_wrist=np.array([
-                    -0.20 + 0.25*np.sin(t),
-                    0.50 + 0.15*np.sin(t*0.7),
-                    0.15*np.cos(t)
+                    -0.40 - 0.15*np.sin(t*0.7),  # Y -> Z
+                    -0.25 + 0.25*np.sin(t),  # -X -> Y
+                    0.15*np.cos(t)  # Z -> X
                 ], dtype=np.float64),
                 left_confidence=90.0,
-                right_shoulder=np.array([0.0, -0.2, 0.0], dtype=np.float64),
+                right_shoulder=np.array([0.0, 0.0, -0.2], dtype=np.float64),  # Transformed from [0,-0.2,0]
                 right_elbow=np.array([
-                    -0.15 + 0.15*np.sin(t + np.pi),
-                    -0.35 + 0.1*np.sin(t*0.7 + np.pi),
-                    0.1*np.cos(t + np.pi)
+                    0.35 + 0.1*np.sin(t*0.7),  # -Y -> -Z
+                    0.15 - 0.15*np.sin(t),  # -X -> -Y
+                    0.1*np.cos(t)  # Z -> X
                 ], dtype=np.float64),
                 right_wrist=np.array([
-                    -0.20 + 0.25*np.sin(t + np.pi),
-                    -0.50 + 0.15*np.sin(t*0.7 + np.pi),
-                    0.15*np.cos(t + np.pi)
+                    0.40 + 0.15*np.sin(t*0.7),  # -Y -> -Z
+                    0.25 - 0.25*np.sin(t),  # -X -> -Y
+                    0.15*np.cos(t)  # Z -> X
                 ], dtype=np.float64),
                 right_confidence=90.0,
             )
@@ -344,3 +369,10 @@ class BodyTrackingNode:
             
             # Sleep to ~30Hz
             time.sleep(self.track_config.tracking_dt)
+            # record loop duration
+            loop_dur = time.time() - loop_start
+            try:
+                # use 'tracking_dummy' to differentiate from real camera loop
+                self.shared.set_loop_duration('tracking_dummy', loop_dur)
+            except Exception:
+                pass

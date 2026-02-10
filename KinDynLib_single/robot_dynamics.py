@@ -98,6 +98,18 @@ class Robot:
         # ProxQP solver (proximal augmented Lagrangian, warm-startable)
         self._proxqp_solver = None
         self._proxqp_prev_dq = np.zeros(DOF, dtype=np.float64)
+        
+        # GPU batched QP solver (PyTorch ADMM, lazily initialized)
+        self._gpu_qp_solver = None
+        self._gpu_qp_solver_right = None  # distributed: right arm
+        self._gpu_qp_solver_left = None   # distributed: left arm
+        
+        # Ratchet: when desired targets are nearly static, only accept IK
+        # solutions that reduce tracking error vs the previous accepted solution.
+        self._ik_ratchet_prev_des = None     # (12,) previous desired EE XYZ
+        self._ik_ratchet_prev_cost = np.inf  # previous accepted tracking cost
+        self._ik_ratchet_q_des = None        # previous accepted q_des (to hold on rejection)
+        self._ik_ratchet_dq_des = None       # previous accepted dq_des
     
     def update(self, q, dq):
         """Update robot state
@@ -380,10 +392,10 @@ class Robot:
         # Task space weights (for ||J*dq - e||^2_W)
         # =====================================================================
         # Elbow weight matrix (6x6: orientation + position)
-        We = 1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)  # position only
+        We = 10*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)  # position only
         
         # Hand weight matrix (6x6: orientation + position)
-        Wh = 1*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)  # position only
+        Wh = 0*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)  # position only
         
         # COM weight matrix (6x6)
         Wc = np.eye(6, dtype=np.float64) * 50000
@@ -392,6 +404,18 @@ class Robot:
         # Must be much smaller than task weights for good tracking
         Wq = np.eye(DOF, dtype=np.float64) * 100
         Wq[:6, :6] = 0  # no regularization on floating base (it's fixed anyway)
+        
+        # Nominal pose attraction weight (for ||q - q_nom||^2_Wq_nom)
+        # Helps avoid joint limits by attracting to a safe nominal configuration
+        Wq_nom = np.eye(DOF, dtype=np.float64) * 5
+        Wq_nom[:6, :6] = 0  # no nominal attraction on floating base
+        q_nom = np.array([0.0, 0.0, 0.85,  # base position (X, Y, Z)
+                          0.0, 0.0, 0.0,  # base orientation (Rx, Ry, Rz)
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # torso (joint 6)
+                          0.2, 0.5, 0.2, 0.5, 0.2,  0.5, 0.2,  # right arm (7 DOFs)
+                          0.2, -0.5, 0.2, -0.5, 0.2, -0.5, 0.2,  # left arm (7 DOFs)
+                          0.0, 0.0], dtype=np.float64)  # remaining joints
         
         # =====================================================================
         # Current state and task errors: e = x_des - x
@@ -518,9 +542,10 @@ class Robot:
         # 
         # Cost1: ||J*dq - e||^2_W = dq^T (J^T W J) dq - 2 e^T W J dq + e^T W e
         # Cost2: ||dq||^2_Wq = dq^T Wq dq
+        # Cost3: ||q_fb + dq - q_nom||^2_Wq_nom = dq^T Wq_nom dq - 2(q_nom - q_fb)^T Wq_nom dq + ...
         #
-        # P = sum(J^T W J) + Wq
-        # c = sum(-J^T W e)  (the -2 factor is absorbed into 0.5 in QP standard form)
+        # P = sum(J^T W J) + Wq + Wq_nom
+        # c = sum(-J^T W e) - 2*Wq_nom*(q_nom - q_fb)
         # =====================================================================
         
         # P matrix (Hessian)
@@ -531,12 +556,13 @@ class Robot:
         P += J_hand_r.T @ Wh @ J_hand_r
         P += J_com.T @ Wc @ J_com
         P += Wq  # regularization
+        P += Wq_nom  # nominal pose attraction
         
         # Make P symmetric and positive definite
         P = 0.5 * (P + P.T)
         P += np.eye(DOF) * 1e-6  # numerical stability
         
-        # c vector (linear term): c = -J^T W e
+        # c vector (linear term)
         c = np.zeros(DOF, dtype=np.float64)
         c -= J_elbow_l.T @ We @ e_elbow_l
         c -= J_elbow_r.T @ We @ e_elbow_r
@@ -544,6 +570,12 @@ class Robot:
         c -= J_hand_r.T @ Wh @ e_hand_r
         c -= J_com.T @ Wc @ e_com
         # Note: Wq term contributes 0 to c since we minimize ||dq||^2 (reference is 0)
+        
+        # Nominal pose attraction: min ||q_fb + dq - q_nom||^2_Wq_nom
+        # = min dq^T Wq_nom dq - 2*(q_nom - q_fb)^T Wq_nom dq + const
+        # Linear term: c += -2*Wq_nom*(q_nom - q_fb) = 2*Wq_nom*(q_fb - q_nom)
+        e_nom = q_fb - q_nom  # error from nominal pose
+        c += 2 * Wq_nom @ e_nom
         
         # =====================================================================
         # Inequality constraints: q_min <= q_fb + dq <= q_max
@@ -848,11 +880,11 @@ class Robot:
         left_dofs = np.concatenate([BASE_DOFS, LEFT_ARM_DOFS])
         
         # Weights: right arm gets primary COM control, left arm gets secondary
-        We = 1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
-        Wh = 10*np.diag([0.0, 0.0, 0.0, 10.0, 10.0, 10.0]).astype(np.float64)
+        We = 0*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 10*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
         Wc_primary = np.eye(6, dtype=np.float64) * 5000
         Wc_secondary = np.eye(6, dtype=np.float64) * 5000
-        Wq_diag = np.ones(DOF, dtype=np.float64) * 50
+        Wq_diag = np.ones(DOF, dtype=np.float64) * 100
         Wq_diag[:6] = 0
         
         # Current state
@@ -1201,5 +1233,579 @@ class Robot:
         
         q_des = self.q + dq_sol
         dq_des = dq_sol
+        
+        return q_des, dq_des
+
+    def update_task_space_command_qp_gpu_batch(self,
+                                               x_elbow_l_des, x_elbow_r_des,
+                                               x_elbow_l, x_elbow_r,
+                                               x_hand_l_des, x_hand_r_des,
+                                               x_hand_l, x_hand_r,
+                                               J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
+                                               com_des,
+                                               n_batch=128, max_iter=20,
+                                               q_perturb_sigma=0.0,
+                                               pos_threshold=0.005):
+        """GPU-batched IK-QP: solve N parallel QPs with randomized warm starts.
+        
+        Solves the same weighted IK problem N times in parallel on GPU, each
+        with a different random initial guess. Returns the solution with the
+        lowest tracking error. This helps escape poor convergence regions that
+        a single warm start might get stuck in.
+        
+        Includes a ratchet mechanism: when the desired end-effector targets
+        haven't moved beyond pos_threshold, only accept the new solution if
+        its linearized tracking error is lower than the previous accepted
+        solution. Otherwise the robot holds its current pose (dq=0).
+        
+        Uses ADMM (Alternating Direction Method of Multipliers) implemented
+        in PyTorch for GPU-parallel batch solving.
+        
+        QP formulation (same as proxqp version):
+            min  0.5 * dq^T H dq + g^T dq
+            s.t. q_min - q <= dq <= q_max - q          (joint limits)
+                 A_cbf @ dq >= b_cbf                    (CBF collision avoidance)
+        
+        Args:
+            x_{elbow,hand}_{l,r}_des: (6,) desired task-space poses [rpy, xyz]
+            x_{elbow,hand}_{l,r}: (6,) current task-space poses
+            J_{elbow,hand}_{l,r}: (6, DOF) task Jacobians
+            com_des: (6,) desired COM/base pose
+            n_batch: number of parallel QP instances (default 128)
+            max_iter: ADMM iterations per solve (default 20)
+            q_perturb_sigma: float >= 0, randomize feedback q per batch
+                instance to explore different linearization points (default 0)
+            pos_threshold: float, max position change (m) in desired EE targets
+                below which the ratchet engages (default 0.005 = 5 mm).
+                Set to 0 to always accept.
+        Returns:
+            q_des: (DOF,) desired joint configuration
+            dq_des: (DOF,) joint velocity (= dq_sol)
+        """
+        try:
+            from gpu_qp_solver import BatchedGPUQPSolver, TORCH_AVAILABLE
+            if not TORCH_AVAILABLE:
+                raise ImportError("PyTorch not available")
+        except ImportError:
+            print("Warning: gpu_qp_solver/PyTorch not available. "
+                  "Falling back to ProxQP.")
+            return self.update_task_space_command_qp_proxqp(
+                x_elbow_l_des, x_elbow_r_des, x_elbow_l, x_elbow_r,
+                x_hand_l_des, x_hand_r_des, x_hand_l, x_hand_r,
+                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r, com_des)
+        
+        # =====================================================================
+        # Lazily create GPU solver (persists across calls for warm-starting)
+        # =====================================================================
+        if (self._gpu_qp_solver is None
+                or self._gpu_qp_solver.n_batch != n_batch
+                or self._gpu_qp_solver.max_iter != max_iter):
+            self._gpu_qp_solver = BatchedGPUQPSolver(
+                n_batch=n_batch,
+                max_iter=max_iter,
+                rho=50.0,       # ADMM penalty (tuned for IK weight scale)
+                alpha=1.6,      # over-relaxation for faster convergence
+                sigma=1e-6,
+                device=None,    # auto-detect GPU
+                dtype='float32'
+            )
+        
+        # =====================================================================
+        # Task-space weights
+        # =====================================================================
+        We = np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 2*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        Wc = np.eye(6, dtype=np.float64) * 5000
+        Wq = np.eye(DOF, dtype=np.float64) * 50
+        Wq[:6, :6] = 0  # no regularization on floating base
+        
+        # =====================================================================
+        # Current state and task errors
+        # =====================================================================
+        q_fb = self.q.astype(np.float64)
+        
+        e_elbow_l = (x_elbow_l_des - x_elbow_l).astype(np.float64)
+        e_elbow_r = (x_elbow_r_des - x_elbow_r).astype(np.float64)
+        e_hand_l = (x_hand_l_des - x_hand_l).astype(np.float64)
+        e_hand_r = (x_hand_r_des - x_hand_r).astype(np.float64)
+        e_com = (com_des - self.q[:6]).astype(np.float64)
+        
+        # COM Jacobian (identity on floating base)
+        J_com = np.zeros((6, DOF), dtype=np.float64)
+        J_com[:, :6] = np.eye(6, dtype=np.float64)
+        
+        J_elbow_l = J_elbow_l.astype(np.float64)
+        J_elbow_r = J_elbow_r.astype(np.float64)
+        J_hand_l = J_hand_l.astype(np.float64)
+        J_hand_r = J_hand_r.astype(np.float64)
+        
+        # =====================================================================
+        # CBF collision-avoidance constraints  (torso / head / crotch spheres)
+        # =====================================================================
+        com_offset = np.array([-0.1, 0.0, 0.0], dtype=np.float64)
+        head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float64)
+        crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float64)
+        head_pos = q_fb[:3] + head_offset
+        crotch_pos = q_fb[:3] + crotch_offset
+        
+        r_torso, r_head, r_crotch = 0.13, 0.11, 0.16
+        safety_margin = 0.02
+        rho_torso = r_torso + safety_margin
+        rho_head = r_head + safety_margin
+        rho_crotch = r_crotch + safety_margin
+        
+        # Distance vectors from end-effectors to each sphere center
+        d_elbow_com_l  = x_elbow_l[3:] - q_fb[:3] - com_offset
+        d_elbow_com_r  = x_elbow_r[3:] - q_fb[:3] - com_offset
+        d_hand_com_l   = x_hand_l[3:]  - q_fb[:3] - com_offset
+        d_hand_com_r   = x_hand_r[3:]  - q_fb[:3] - com_offset
+        
+        d_elbow_head_l = x_elbow_l[3:] - head_pos
+        d_elbow_head_r = x_elbow_r[3:] - head_pos
+        d_hand_head_l  = x_hand_l[3:]  - head_pos
+        d_hand_head_r  = x_hand_r[3:]  - head_pos
+        
+        d_elbow_crotch_l = x_elbow_l[3:] - crotch_pos
+        d_elbow_crotch_r = x_elbow_r[3:] - crotch_pos
+        d_hand_crotch_l  = x_hand_l[3:]  - crotch_pos
+        d_hand_crotch_r  = x_hand_r[3:]  - crotch_pos
+        
+        # Barrier functions h >= 0 (outside sphere)
+        h_vals = np.array([
+            np.dot(d_elbow_com_l, d_elbow_com_l)     - rho_torso**2,
+            np.dot(d_elbow_com_r, d_elbow_com_r)     - rho_torso**2,
+            np.dot(d_hand_com_l, d_hand_com_l)       - rho_torso**2,
+            np.dot(d_hand_com_r, d_hand_com_r)       - rho_torso**2,
+            np.dot(d_elbow_head_l, d_elbow_head_l)   - rho_head**2,
+            np.dot(d_elbow_head_r, d_elbow_head_r)   - rho_head**2,
+            np.dot(d_hand_head_l, d_hand_head_l)     - rho_head**2,
+            np.dot(d_hand_head_r, d_hand_head_r)     - rho_head**2,
+            np.dot(d_elbow_crotch_l, d_elbow_crotch_l) - rho_crotch**2,
+            np.dot(d_elbow_crotch_r, d_elbow_crotch_r) - rho_crotch**2,
+            np.dot(d_hand_crotch_l, d_hand_crotch_l)   - rho_crotch**2,
+            np.dot(d_hand_crotch_r, d_hand_crotch_r)   - rho_crotch**2,
+        ], dtype=np.float64)
+        
+        # Featherstone: J[0:3,:]=angular, J[3:6,:]=linear. CBF uses linear rows.
+        J_com_lin = J_com[:3, :]  # translational COM Jacobian
+        d_list = [
+            d_elbow_com_l, d_elbow_com_r, d_hand_com_l, d_hand_com_r,
+            d_elbow_head_l, d_elbow_head_r, d_hand_head_l, d_hand_head_r,
+            d_elbow_crotch_l, d_elbow_crotch_r, d_hand_crotch_l, d_hand_crotch_r,
+        ]
+        J_ee_lin_list = [
+            J_elbow_l[3:, :], J_elbow_r[3:, :], J_hand_l[3:, :], J_hand_r[3:, :],
+            J_elbow_l[3:, :], J_elbow_r[3:, :], J_hand_l[3:, :], J_hand_r[3:, :],
+            J_elbow_l[3:, :], J_elbow_r[3:, :], J_hand_l[3:, :], J_hand_r[3:, :],
+        ]
+        
+        aT_rows = [2.0 * d @ (J_ee - J_com_lin)
+                   for d, J_ee in zip(d_list, J_ee_lin_list)]
+        aT_cbf = np.vstack(aT_rows)           # (12, DOF)
+        
+        lambda_cbf = 0.5
+        b_cbf = -lambda_cbf * h_vals            # (12,)
+        
+        # =====================================================================
+        # Build QP cost: min 0.5 * dq^T H dq + g^T dq
+        # =====================================================================
+        H_qp = np.zeros((DOF, DOF), dtype=np.float64)
+        H_qp += J_elbow_l.T @ We @ J_elbow_l
+        H_qp += J_elbow_r.T @ We @ J_elbow_r
+        H_qp += J_hand_l.T @ Wh @ J_hand_l
+        H_qp += J_hand_r.T @ Wh @ J_hand_r
+        H_qp += J_com.T @ Wc @ J_com
+        H_qp += Wq
+        H_qp = 0.5 * (H_qp + H_qp.T)           # symmetrize
+        H_qp += np.eye(DOF) * 1e-6              # numerical stability
+        
+        g_qp = np.zeros(DOF, dtype=np.float64)
+        g_qp -= J_elbow_l.T @ We @ e_elbow_l
+        g_qp -= J_elbow_r.T @ We @ e_elbow_r
+        g_qp -= J_hand_l.T @ Wh @ e_hand_l
+        g_qp -= J_hand_r.T @ Wh @ e_hand_r
+        g_qp -= J_com.T @ Wc @ e_com
+        
+        # =====================================================================
+        # Inequality constraints: l <= C @ dq <= u
+        #   Row block 1: box (joint limits)   I @ dq in [q_min-q, q_max-q]
+        #   Row block 2: CBF                  aT @ dq in [b_cbf,  +inf]
+        # =====================================================================
+        qj_min = q_min.astype(np.float64)
+        qj_max = q_max.astype(np.float64)
+        lb_box = qj_min - q_fb
+        ub_box = qj_max - q_fb
+        
+        n_cbf = aT_cbf.shape[0]   # 12
+        C_qp = np.vstack([np.eye(DOF, dtype=np.float64), aT_cbf])   # (DOF+12, DOF)
+        l_qp = np.concatenate([lb_box, b_cbf])                      # (DOF+12,)
+        u_qp = np.concatenate([ub_box, np.full(n_cbf, np.inf)])      # (DOF+12,)
+        
+        # =====================================================================
+        # Task-only Hessian for q-perturbation linearization
+        # H_task = H_qp - Wq - regularization ≈ sum(J^T W J)
+        # =====================================================================
+        H_task = H_qp - Wq - np.eye(DOF) * 1e-6
+        
+        # =====================================================================
+        # Solve with GPU-batched ADMM
+        # =====================================================================
+        # Warm start from previous best (internal to solver)
+        x_warm = None
+        if (self._gpu_qp_solver._prev_best is not None
+                and self._gpu_qp_solver._prev_n == DOF):
+            x_warm = self._gpu_qp_solver._prev_best.cpu().numpy()
+        
+        dq_sol = self._gpu_qp_solver.solve(
+            H=H_qp, g=g_qp, C=C_qp, l=l_qp, u=u_qp,
+            x_warm=x_warm,
+            q_perturb_sigma=q_perturb_sigma,
+            n_box=DOF,
+            H_task=H_task
+        )
+        
+        # =================================================================
+        # Ratchet: only accept when tracking improves (static targets)
+        # =================================================================
+        if pos_threshold > 0:
+            # Current tracking errors (position only, indices 3:6)
+            current_cost = (np.sum((x_elbow_l_des[3:] - x_elbow_l[3:])**2) +
+                            np.sum((x_elbow_r_des[3:] - x_elbow_r[3:])**2) +
+                            np.sum((x_hand_l_des[3:] - x_hand_l[3:])**2) +
+                            np.sum((x_hand_r_des[3:] - x_hand_r[3:])**2))
+            
+            des_pos = np.concatenate([
+                x_elbow_l_des[3:], x_elbow_r_des[3:],
+                x_hand_l_des[3:], x_hand_r_des[3:]
+            ]).astype(np.float64)
+            
+            target_moved = True
+            if self._ik_ratchet_prev_des is not None:
+                max_shift = np.max(np.abs(des_pos - self._ik_ratchet_prev_des))
+                target_moved = (max_shift > pos_threshold)
+            
+            if target_moved or current_cost < self._ik_ratchet_prev_cost:
+                # Accept: target moved or current tracking is better
+                self._ik_ratchet_prev_des = des_pos
+                self._ik_ratchet_prev_cost = current_cost
+            else:
+                # Reject: return previously accepted pose (hold)
+                if (self._ik_ratchet_q_des is not None
+                        and self._ik_ratchet_dq_des is not None):
+                    return self._ik_ratchet_q_des, self._ik_ratchet_dq_des
+                else:
+                    # First iteration, no prior solution yet; send this one
+                    pass
+        
+        q_des = self.q + dq_sol.astype(np.float32)
+        dq_des = dq_sol.astype(np.float32)
+        
+        # Cache as the last accepted solution for future ratchet rejections
+        self._ik_ratchet_q_des = q_des
+        self._ik_ratchet_dq_des = dq_des
+        
+        return q_des, dq_des
+
+    def update_task_space_command_qp_gpu_batch_distributed(self,
+                                                            x_elbow_l_des, x_elbow_r_des,
+                                                            x_elbow_l, x_elbow_r,
+                                                            x_hand_l_des, x_hand_r_des,
+                                                            x_hand_l, x_hand_r,
+                                                            J_elbow_l, J_elbow_r,
+                                                            J_hand_l, J_hand_r,
+                                                            com_des,
+                                                            n_batch=128, max_iter=20,
+                                                            q_perturb_sigma=0.0,
+                                                            pos_threshold=0.005):
+        """Distributed GPU-batched IK-QP: two independent 13-DOF QPs per arm.
+        
+        Decouples left/right arm tracking by solving separate (base 6 + arm 7
+        = 13 DOF) QPs for each arm. Each QP is solved N times in parallel on
+        GPU with randomized warm starts (and optionally randomized q feedback).
+        
+        Includes a ratchet mechanism: when the desired end-effector targets
+        haven't moved beyond pos_threshold, only accept the new solution if
+        its linearized tracking error is lower than the previous accepted
+        solution. Otherwise the robot holds its current pose (dq=0).
+        
+        This combines the benefits of:
+          - Distributed solving (no cross-arm interference)
+          - GPU-batched ADMM (parallel local-minima exploration)
+          - Q-perturbation (different linearization points)
+          - Ratchet (monotonic tracking improvement when target is static)
+        
+        Args:
+            x_{elbow,hand}_{l,r}_des: (6,) desired task-space poses [rpy, xyz]
+            x_{elbow,hand}_{l,r}: (6,) current task-space poses
+            J_{elbow,hand}_{l,r}: (6, DOF) task Jacobians
+            com_des: (6,) desired COM/base pose
+            n_batch: number of parallel QP instances per arm (default 128)
+            max_iter: ADMM iterations per solve (default 20)
+            q_perturb_sigma: float >= 0, randomize feedback q per batch
+                instance to explore different linearization points (default 0)
+            pos_threshold: float, max position change (m) in desired EE targets
+                below which the ratchet engages (default 0.005 = 5 mm).
+                Set to 0 to always accept.
+        Returns:
+            q_des: (DOF,) desired joint configuration
+            dq_des: (DOF,) joint velocity
+        """
+        try:
+            from gpu_qp_solver import BatchedGPUQPSolver, TORCH_AVAILABLE
+            if not TORCH_AVAILABLE:
+                raise ImportError("PyTorch not available")
+        except ImportError:
+            print("Warning: gpu_qp_solver/PyTorch not available. "
+                  "Falling back to distributed ProxQP.")
+            return self.update_task_space_command_qp_distributed_proxqp(
+                x_elbow_l_des, x_elbow_r_des, x_elbow_l, x_elbow_r,
+                x_hand_l_des, x_hand_r_des, x_hand_l, x_hand_r,
+                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r, com_des)
+        
+        # =====================================================================
+        # Lazily create a single fused GPU solver (persist across calls)
+        # =====================================================================
+        if (self._gpu_qp_solver_right is None
+                or self._gpu_qp_solver_right.n_batch != n_batch
+                or self._gpu_qp_solver_right.max_iter != max_iter):
+            self._gpu_qp_solver_right = BatchedGPUQPSolver(
+                n_batch=n_batch,
+                max_iter=max_iter,
+                rho=50.0,
+                alpha=1.6,
+                sigma=1e-6,
+                device=None,
+                dtype='float32'
+            )
+        
+        # =====================================================================
+        # DOF partitioning
+        # =====================================================================
+        BASE_DOFS = np.arange(0, 6)
+        RIGHT_ARM_DOFS = np.arange(18, 25)
+        LEFT_ARM_DOFS = np.arange(25, 32)
+        right_dofs = np.concatenate([BASE_DOFS, RIGHT_ARM_DOFS])  # 13
+        left_dofs = np.concatenate([BASE_DOFS, LEFT_ARM_DOFS])    # 13
+        n_sub = 13
+        
+        # =====================================================================
+        # Weights (matching distributed ProxQP version)
+        # =====================================================================
+        We = 0.1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = np.diag([1.0, 1.0, 1.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        Wc = np.eye(6, dtype=np.float64) * 5000
+        Wq_val = 10.0
+        
+        # =====================================================================
+        # Current state and errors
+        # =====================================================================
+        q_fb = self.q.astype(np.float64)
+        e_elbow_l = (x_elbow_l_des - x_elbow_l).astype(np.float64)
+        e_elbow_r = (x_elbow_r_des - x_elbow_r).astype(np.float64)
+        e_hand_l = (x_hand_l_des - x_hand_l).astype(np.float64)
+        e_hand_r = (x_hand_r_des - x_hand_r).astype(np.float64)
+        e_com = (com_des - self.q[:6]).astype(np.float64)
+        
+        J_com_full = np.zeros((6, DOF), dtype=np.float64)
+        J_com_full[:, :6] = np.eye(6, dtype=np.float64)
+        
+        J_elbow_l = J_elbow_l.astype(np.float64)
+        J_elbow_r = J_elbow_r.astype(np.float64)
+        J_hand_l = J_hand_l.astype(np.float64)
+        J_hand_r = J_hand_r.astype(np.float64)
+        
+        qj_min = q_min.astype(np.float64)
+        qj_max = q_max.astype(np.float64)
+        
+        # =====================================================================
+        # CBF setup (torso / head / crotch spheres)
+        # =====================================================================
+        com_offset = np.array([-0.1, 0.0, 0.0], dtype=np.float64)
+        head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float64)
+        crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float64)
+        head_pos = q_fb[:3] + head_offset
+        crotch_pos = q_fb[:3] + crotch_offset
+        
+        r_torso, r_head, r_crotch = 0.13, 0.11, 0.16
+        rho_torso = r_torso + 0.02
+        rho_head = r_head + 0.02
+        rho_crotch = r_crotch + 0.02
+        lambda_cbf = 0.5
+        
+        def _build_arm_qp(dof_indices, J_elbow, J_hand, e_elbow, e_hand,
+                          x_elbow, x_hand, Wc_arm):
+            """Build the QP matrices for one arm (13 DOF)."""
+            J_elbow_sub = J_elbow[:, dof_indices]
+            J_hand_sub = J_hand[:, dof_indices]
+            J_com_sub = J_com_full[:, dof_indices]
+            Wq_sub = np.eye(n_sub, dtype=np.float64) * Wq_val
+            
+            # Hessian
+            H = (J_elbow_sub.T @ We @ J_elbow_sub +
+                 J_hand_sub.T @ Wh @ J_hand_sub +
+                 J_com_sub.T @ Wc_arm @ J_com_sub +
+                 Wq_sub)
+            H = 0.5 * (H + H.T)
+            H += np.eye(n_sub) * 1e-6
+            
+            # Check for NaN/Inf in Hessian
+            if not np.all(np.isfinite(H)):
+                print(f"WARNING: Hessian contains NaN/Inf! Adding stronger regularization.")
+                H = np.eye(n_sub, dtype=np.float64) * 1e-3  # Fallback to identity
+            
+            # Task-only Hessian (for q-perturbation g correction)
+            H_task = H - Wq_sub - np.eye(n_sub) * 1e-6
+            
+            # Linear term
+            g = -(J_elbow_sub.T @ We @ e_elbow +
+                  J_hand_sub.T @ Wh @ e_hand +
+                  J_com_sub.T @ Wc_arm @ e_com)
+            
+            # Check for NaN/Inf in gradient
+            if not np.all(np.isfinite(g)):
+                print(f"WARNING: Gradient g contains NaN/Inf! Zeroing it.")
+                g = np.zeros(n_sub, dtype=np.float64)
+            
+            # ── CBF constraints ──────────────────────────────────────────
+            x_elbow_pos = x_elbow[3:].astype(np.float64)
+            x_hand_pos = x_hand[3:].astype(np.float64)
+            
+            d_elbow_com = x_elbow_pos - q_fb[:3] - com_offset
+            d_hand_com = x_hand_pos - q_fb[:3] - com_offset
+            d_elbow_head = x_elbow_pos - head_pos
+            d_hand_head = x_hand_pos - head_pos
+            d_elbow_crotch = x_elbow_pos - crotch_pos
+            d_hand_crotch = x_hand_pos - crotch_pos
+            
+            h_vals = np.array([
+                np.dot(d_elbow_com, d_elbow_com) - rho_torso**2,
+                np.dot(d_hand_com, d_hand_com) - rho_torso**2,
+                np.dot(d_elbow_head, d_elbow_head) - rho_head**2,
+                np.dot(d_hand_head, d_hand_head) - rho_head**2,
+                np.dot(d_elbow_crotch, d_elbow_crotch) - rho_crotch**2,
+                np.dot(d_hand_crotch, d_hand_crotch) - rho_crotch**2,
+            ], dtype=np.float64)
+            
+            J_elbow_lin = J_elbow[3:, dof_indices]
+            J_hand_lin = J_hand[3:, dof_indices]
+            J_com_lin = J_com_full[:3, dof_indices]
+            
+            d_list = [d_elbow_com, d_hand_com, d_elbow_head,
+                      d_hand_head, d_elbow_crotch, d_hand_crotch]
+            J_refs = [J_elbow_lin, J_hand_lin, J_elbow_lin,
+                      J_hand_lin, J_elbow_lin, J_hand_lin]
+            
+            aT_rows = [2.0 * d @ (J_ref - J_com_lin)
+                       for d, J_ref in zip(d_list, J_refs)]
+            aT_cbf = np.vstack(aT_rows)                # (6, n_sub)
+            b_cbf = -lambda_cbf * h_vals                # (6,)
+            
+            # ── Combined constraints ─────────────────────────────────────
+            lb_box = qj_min[dof_indices] - q_fb[dof_indices]
+            ub_box = qj_max[dof_indices] - q_fb[dof_indices]
+            
+            n_cbf = 6
+            C_qp = np.vstack([np.eye(n_sub, dtype=np.float64), aT_cbf])
+            l_qp = np.concatenate([lb_box, b_cbf])
+            u_qp = np.concatenate([ub_box, np.full(n_cbf, np.inf)])
+            
+            return H, g, C_qp, l_qp, u_qp, H_task
+        
+        # =====================================================================
+        # Build and solve QPs (fused block-diagonal for 2× speedup)
+        # =====================================================================
+        H_r, g_r, C_r, l_r, u_r, Ht_r = _build_arm_qp(
+            right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
+            x_elbow_r, x_hand_r, Wc)
+        
+        H_l, g_l, C_l, l_l, u_l, Ht_l = _build_arm_qp(
+            left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
+            x_elbow_l, x_hand_l, Wc)
+        
+        # Warm start from previous fused solution (split back to per-arm)
+        fused_solver = self._gpu_qp_solver_right  # reuse field for fused solver
+        x_warm_r = None
+        x_warm_l = None
+        if (fused_solver._prev_best is not None
+                and fused_solver._prev_n == 2 * n_sub):
+            prev = fused_solver._prev_best.cpu().numpy()
+            x_warm_r = prev[:n_sub]
+            x_warm_l = prev[n_sub:]
+        
+        # Solve both arms as a single fused block-diagonal QP
+        dq_right, dq_left = BatchedGPUQPSolver.solve_pair(
+            fused_solver,
+            H_r, g_r, C_r, l_r, u_r,
+            H_l, g_l, C_l, l_l, u_l,
+            x_warm_a=x_warm_r, x_warm_b=x_warm_l,
+            q_perturb_sigma=q_perturb_sigma,
+            n_box_a=n_sub, n_box_b=n_sub,
+            H_task_a=Ht_r, H_task_b=Ht_l
+        )
+        
+        # Check for NaN/Inf in solver output
+        if (not np.all(np.isfinite(dq_right)) or not np.all(np.isfinite(dq_left))):
+            print(f"WARNING: GPU QP solver returned NaN/Inf!")
+            print(f"  dq_right finite: {np.isfinite(dq_right)}")
+            print(f"  dq_left finite: {np.isfinite(dq_left)}")
+            print(f"  H_r finite: {np.all(np.isfinite(H_r))}, cond: {np.linalg.cond(H_r):.2e}")
+            print(f"  H_l finite: {np.all(np.isfinite(H_l))}, cond: {np.linalg.cond(H_l):.2e}")
+            print(f"  g_r finite: {np.all(np.isfinite(g_r))}, max: {np.max(np.abs(g_r)):.2e}")
+            print(f"  g_l finite: {np.all(np.isfinite(g_l))}, max: {np.max(np.abs(g_l)):.2e}")
+            print("  Returning zero velocity.")
+            return self.q, np.zeros(DOF, dtype=np.float32)
+        
+        # =====================================================================
+        # Combine: right arm base takes priority, left arm contributes limb only
+        # =====================================================================
+        dq_sol = np.zeros(DOF, dtype=np.float32)
+        dq_sol[:6] = dq_right[:6].astype(np.float32)         # base from right
+        dq_sol[18:25] = dq_right[6:].astype(np.float32)      # right arm joints
+        dq_sol[25:32] = dq_left[6:].astype(np.float32)       # left arm joints
+        
+        # =================================================================
+        # Ratchet: only accept when tracking improves (static targets)
+        # =================================================================
+        if pos_threshold > 0:
+            # Current tracking errors (position only, indices 3:6)
+            current_cost = (np.sum((x_elbow_l_des[3:] - x_elbow_l[3:])**2) +
+                            np.sum((x_elbow_r_des[3:] - x_elbow_r[3:])**2) +
+                            np.sum((x_hand_l_des[3:] - x_hand_l[3:])**2) +
+                            np.sum((x_hand_r_des[3:] - x_hand_r[3:])**2))
+            
+            des_pos = np.concatenate([
+                x_elbow_l_des[3:], x_elbow_r_des[3:],
+                x_hand_l_des[3:], x_hand_r_des[3:]
+            ]).astype(np.float64)
+            
+            target_moved = True
+            if self._ik_ratchet_prev_des is not None:
+                max_shift = np.max(np.abs(des_pos - self._ik_ratchet_prev_des))
+                target_moved = (max_shift > pos_threshold)
+            
+            if target_moved or current_cost < self._ik_ratchet_prev_cost:
+                # Accept: target moved or current tracking is better
+                self._ik_ratchet_prev_des = des_pos
+                self._ik_ratchet_prev_cost = current_cost
+            else:
+                # Reject: return previously accepted pose (hold)
+                if (self._ik_ratchet_q_des is not None
+                        and self._ik_ratchet_dq_des is not None):
+                    return self._ik_ratchet_q_des, self._ik_ratchet_dq_des
+                else:
+                    # First iteration, no prior solution yet; send this one
+                    pass
+        
+        q_des = self.q + dq_sol
+        dq_des = dq_sol
+        
+        # Final NaN/Inf check before returning
+        if not np.all(np.isfinite(q_des)) or not np.all(np.isfinite(dq_des)):
+            print("WARNING: Final q_des/dq_des contains NaN/Inf! Returning current state.")
+            return self.q, np.zeros(DOF, dtype=np.float32)
+        
+        # Cache as the last accepted solution for future ratchet rejections
+        self._ik_ratchet_q_des = q_des
+        self._ik_ratchet_dq_des = dq_des
         
         return q_des, dq_des

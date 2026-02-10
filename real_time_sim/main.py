@@ -9,10 +9,10 @@ Launches all nodes in proper order with synchronized data flow:
 4. Body Tracking (30Hz ZED)
 
 Run with sudo for ZED camera access:
-    sudo /home/junhengl/body_tracking/.venv/bin/python -m real_time_sim.main
+    sudo /home/junhengl/real_time_human-humanoid_tracking/.venv/bin/python -m real_time_sim.main
 
 Or directly:
-    sudo /home/junhengl/body_tracking/.venv/bin/python real_time_sim/main.py
+    sudo /home/junhengl/real_time_human-humanoid_tracking/.venv/bin/python real_time_sim/main.py
 """
 
 import os

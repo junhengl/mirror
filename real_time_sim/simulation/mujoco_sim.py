@@ -275,20 +275,20 @@ class MuJoCoSimulation:
                 g.rgba[:] = [0.0, 1.0, 0.5, 0.25]  # Cyan-green, semi-transparent
                 ngeom += 1
             
-            # Desired markers (red/orange)
+            # Desired markers (increased contrast: LEFT brighter, RIGHT slightly cooler)
             colors_des = {
-                'hand_l_des': [1.0, 0.2, 0.2, 0.8],  # Red
-                'hand_r_des': [1.0, 0.2, 0.2, 0.8],
-                'elbow_l_des': [1.0, 0.6, 0.0, 0.8],  # Orange
-                'elbow_r_des': [1.0, 0.6, 0.0, 0.8],
+                'hand_l_des': [1.00, 0.08, 0.18, 1.00],  # Very bright red (LEFT)
+                'hand_r_des': [0.08, 0.55, 1.00, 1.00],  # Bright cyan-blue (RIGHT)
+                'elbow_l_des': [1.00, 0.18, 0.28, 1.00],  # Bright pinkish (LEFT)
+                'elbow_r_des': [0.18, 0.72, 1.00, 1.00],  # Bright light blue (RIGHT)
             }
-            
-            # Actual markers (green/cyan)
+
+            # Actual markers (distinct but slightly muted relative to desired)
             colors_act = {
-                'hand_l_act': [0.2, 1.0, 0.2, 0.8],  # Green
-                'hand_r_act': [0.2, 1.0, 0.2, 0.8],
-                'elbow_l_act': [0.0, 1.0, 1.0, 0.8],  # Cyan
-                'elbow_r_act': [0.0, 1.0, 1.0, 0.8],
+                'hand_l_act': [0.85, 0.06, 0.12, 0.90],  # Muted-but-warm red (LEFT)
+                'hand_r_act': [0.06, 0.40, 0.72, 0.90],  # Muted blue (RIGHT)
+                'elbow_l_act': [0.90, 0.12, 0.18, 0.90],  # Muted pink (LEFT)
+                'elbow_r_act': [0.14, 0.58, 0.82, 0.90],  # Muted light blue (RIGHT)
             }
             
             # Render desired markers (larger)

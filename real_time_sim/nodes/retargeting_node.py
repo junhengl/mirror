@@ -58,8 +58,8 @@ class RetargetingNode:
         self.Xelbow_r = Xtrans(self.elbow_r_offset)
         
         # Link indices
-        self.hand_r_link = 22
-        self.hand_l_link = 29
+        self.hand_r_link = 23
+        self.hand_l_link = 30
         self.elbow_r_link = 21
         self.elbow_l_link = 28
         
@@ -76,7 +76,7 @@ class RetargetingNode:
         # Output smoothing
         self.filtered_q = self.q.copy()
         self.filter_alpha = 0.4
-        self.max_joint_delta = 5  # rad per step at 500Hz
+        self.max_joint_delta = 50  # rad per step at 500Hz
         
         # Base offset for visualization (from config)
         self.base_height = config.sim.base_height
@@ -148,9 +148,11 @@ class RetargetingNode:
             return np.array([pos_zed[2], -pos_zed[0], pos_zed[1]], dtype=np.float64)
         
         # Convert positions
-        left_elbow_robot = zed_to_robot(tracking.left_elbow)
+        # NOTE: ZED camera labels keypoints from its perspective (left/right of image)
+        # User faces camera, so ZED "left" is user's right, ZED "right" is user's left
+        left_elbow_robot = zed_to_robot(tracking.left_elbow)      # camera left = user right
         left_wrist_robot = zed_to_robot(tracking.left_wrist)
-        right_elbow_robot = zed_to_robot(tracking.right_elbow)
+        right_elbow_robot = zed_to_robot(tracking.right_elbow)    # camera right = user left
         right_wrist_robot = zed_to_robot(tracking.right_wrist)
         
         # Scale to robot dimensions
@@ -160,10 +162,10 @@ class RetargetingNode:
         zero_orient = np.zeros(3, dtype=np.float64)
         
         return {
-            'x_hand_l_des': np.concatenate([zero_orient, left_wrist_robot * scale]),
-            'x_hand_r_des': np.concatenate([zero_orient, right_wrist_robot * scale]),
-            'x_elbow_l_des': np.concatenate([zero_orient, left_elbow_robot * scale]),
-            'x_elbow_r_des': np.concatenate([zero_orient, right_elbow_robot * scale])
+            'x_hand_l_des': np.concatenate([zero_orient, right_wrist_robot * scale]),    # camera right → robot left
+            'x_hand_r_des': np.concatenate([zero_orient, left_wrist_robot * scale]),     # camera left → robot right
+            'x_elbow_l_des': np.concatenate([zero_orient, right_elbow_robot * scale]),   # camera right → robot left
+            'x_elbow_r_des': np.concatenate([zero_orient, left_elbow_robot * scale])     # camera left → robot right
         }
     
     def _solve_ik(self, tracking: ArmTrackingData, feedback) -> RetargetingOutput:
@@ -217,27 +219,48 @@ class RetargetingNode:
         for _ in range(self.retarget_config.num_ik_iterations):
             self.robot.update(q_current+q_offset*0.00, dq_current)
             
-            # Compute FK
-            x_hand_r, _ = self.robot.compute_forward_kinematics(self.hand_r_link, self.hand_r_offset)
-            x_hand_l, _ = self.robot.compute_forward_kinematics(self.hand_l_link, self.hand_l_offset)
-            x_elbow_r, _ = self.robot.compute_forward_kinematics(self.elbow_r_link, self.elbow_r_offset)
-            x_elbow_l, _ = self.robot.compute_forward_kinematics(self.elbow_l_link, self.elbow_l_offset)
+            # Compute FK and Jacobians for hands and elbows
+            x_hand_r, J_hand_r = self.robot.compute_forward_kinematics(self.hand_r_link, self.hand_r_offset)
+            x_hand_l, J_hand_l = self.robot.compute_forward_kinematics(self.hand_l_link, self.hand_l_offset)
+            x_elbow_r, J_elbow_r = self.robot.compute_forward_kinematics(self.elbow_r_link, self.elbow_r_offset)
+            x_elbow_l, J_elbow_l = self.robot.compute_forward_kinematics(self.elbow_l_link, self.elbow_l_offset)
             
-            # Compute Jacobians
-            J_hand_r = self.robot.compute_body_jacobian(self.hand_r_link, self.Xhand_r)
-            J_hand_l = self.robot.compute_body_jacobian(self.hand_l_link, self.Xhand_l)
-            J_elbow_r = self.robot.compute_body_jacobian(self.elbow_r_link, self.Xelbow_r)
-            J_elbow_l = self.robot.compute_body_jacobian(self.elbow_l_link, self.Xelbow_l)
+            # # Compute Jacobians
+            # J_hand_r = self.robot.compute_body_jacobian(self.hand_r_link, self.Xhand_r)
+            # J_hand_l = self.robot.compute_body_jacobian(self.hand_l_link, self.Xhand_l)
+            # J_elbow_r = self.robot.compute_body_jacobian(self.elbow_r_link, self.Xelbow_r)
+            # J_elbow_l = self.robot.compute_body_jacobian(self.elbow_l_link, self.Xelbow_l)
             
-            # Solve IK step (QP solver: distributed ProxQP)
-            q_des, dq_des = self.robot.update_task_space_command_qp_distributed(
-                desired['x_elbow_l_des'], desired['x_elbow_r_des'],
-                x_elbow_l, x_elbow_r,
-                desired['x_hand_l_des'], desired['x_hand_r_des'],
-                x_hand_l, x_hand_r,
-                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
-                self.com_des
+            # timer for IK solve
+            ik_start = time.perf_counter()
+
+            # # Solve IK step (QP solver: distributed ProxQP)
+            # q_des, dq_des = self.robot.update_task_space_command_qp_distributed(
+            #     desired['x_elbow_l_des'], desired['x_elbow_r_des'],
+            #     x_elbow_l, x_elbow_r,
+            #     desired['x_hand_l_des'], desired['x_hand_r_des'],
+            #     x_hand_l, x_hand_r,
+            #     J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
+            #     self.com_des
+            # )
+
+            # Solve IK step (GPU-batched QP solver - single batch)
+            q_des, dq_des = self.robot.update_task_space_command_qp_gpu_batch_distributed(
+                        desired['x_elbow_l_des'], desired['x_elbow_r_des'], x_elbow_l, x_elbow_r,
+                        desired['x_hand_l_des'], desired['x_hand_r_des'], x_hand_l, x_hand_r,
+                        J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
+                        self.com_des,
+                        n_batch=4096, max_iter=20,
+                        q_perturb_sigma=0.0  # tunable
             )
+            ik_time = time.perf_counter() - ik_start
+            self.shared.update_timing('ik_solve', ik_time)
+            print(f"[Retargeting] IK solve time: {ik_time*1000:.2f} ms")
+
+            # Check for NaN/Inf after IK solve
+            if not np.all(np.isfinite(q_des)) or not np.all(np.isfinite(dq_des)):
+                print(f"WARNING: IK returned NaN/Inf! Holding previous pose.")
+                break  # Exit IK iteration loop, use previous q_current
 
             q_current = q_des.copy()
             dq_current = dq_des.copy()
@@ -254,6 +277,13 @@ class RetargetingNode:
             np.sin(self.filtered_q[6:6+28]),
             np.cos(self.filtered_q[6:6+28])
         )
+        
+        # Final check before output
+        if not np.all(np.isfinite(self.filtered_q)):
+            print("WARNING: filtered_q contains NaN/Inf! Resetting to zero pose.")
+            self.filtered_q = np.zeros_like(self.filtered_q)
+            output.valid = False
+            return output
         
         # Update internal state
         self.q = q_current
@@ -290,3 +320,6 @@ class RetargetingNode:
         output.elbow_r_act = x_elbow_r_act[3:6] + base_offset
         
         return output
+
+
+# sudo .venv/bin/python -m real_time_sim.main

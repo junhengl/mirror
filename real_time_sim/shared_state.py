@@ -167,6 +167,9 @@ class SharedState:
             'sim_hz': 0.0,
         }
         self._timing_lock = threading.Lock()
+        # Per-loop duration storage (seconds)
+        self._loop_durations = {}
+        self._loop_lock = threading.Lock()
         
     # --- Tracking Data ---
     def set_tracking_data(self, data: ArmTrackingData):
@@ -236,6 +239,18 @@ class SharedState:
         """Get all timing statistics."""
         with self._timing_lock:
             return self._timing_stats.copy()
+
+    # --- Loop durations ---
+    def set_loop_duration(self, node_name: str, duration_s: float):
+        """Set last loop duration (in seconds) for a node."""
+        key = f'{node_name}_loop_s'
+        with self._loop_lock:
+            self._loop_durations[key] = float(duration_s)
+
+    def get_loop_durations(self) -> dict:
+        """Get last loop durations for all nodes."""
+        with self._loop_lock:
+            return self._loop_durations.copy()
     
     # --- Shutdown ---
     def request_shutdown(self):
