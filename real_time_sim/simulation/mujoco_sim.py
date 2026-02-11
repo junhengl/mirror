@@ -233,7 +233,9 @@ class MuJoCoSimulation:
             torso_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "BASE_LINK")
             if torso_body_id >= 0 and ngeom < self.viewer.user_scn.maxgeom:
                 torso_pos = self.data.xpos[torso_body_id].copy()
-                r_torso = 0.13  # Must match r_torso in robot_dynamics.py CBF
+                torso_offset = np.array([-0.1, 0.0, 0.0], dtype=np.float32)
+                torso_pos += torso_offset
+                r_torso = 0.15  # Must match r_torso in robot_dynamics.py CBF
                 safety_margin = 0.02  # Must match safety_margin in robot_dynamics.py CBF
                 cbf_radius = r_torso + safety_margin
                 
@@ -251,7 +253,7 @@ class MuJoCoSimulation:
                 torso_pos = self.data.xpos[torso_body_id].copy()
                 head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float32)
                 head_pos = torso_pos + head_offset
-                r_head = 0.11  # Must match r_head in robot_dynamics.py CBF
+                r_head = 0.13  # Must match r_head in robot_dynamics.py CBF
                 safety_margin = 0.02  # Must match safety_margin in robot_dynamics.py CBF
                 cbf_radius_head = r_head + safety_margin
                 
@@ -269,7 +271,7 @@ class MuJoCoSimulation:
                 torso_pos = self.data.xpos[torso_body_id].copy()
                 crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float32)
                 crotch_pos = torso_pos + crotch_offset
-                r_crotch = 0.16  # Must match r_crotch in robot_dynamics.py CBF
+                r_crotch = 0.19  # Must match r_crotch in robot_dynamics.py CBF
                 safety_margin = 0.02  # Must match safety_margin in robot_dynamics.py CBF
                 cbf_radius_crotch = r_crotch + safety_margin
                 

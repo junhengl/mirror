@@ -35,6 +35,43 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
+def _generate_lhs_samples(n_samples: int, n_dims: int, seed: Optional[int] = None) -> np.ndarray:
+    """
+    Generate Latin Hypercube Samples (LHS).
+    
+    Ensures uniform marginal coverage along each dimension while maintaining
+    diversity. Returns samples in [-1, 1]^n_dims, ready to be scaled by
+    perturbation sigma and dampening factors.
+    
+    Args:
+        n_samples: Number of LHS samples to generate
+        n_dims: Dimensionality (DOF count, typically 13 for distributed arm or 34 for full)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        samples: (n_samples, n_dims) numpy array in [-1, 1]
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # LHS matrix: each row is a permutation ensuring uniform marginals
+    samples = np.zeros((n_samples, n_dims), dtype=np.float32)
+    
+    for d in range(n_dims):
+        # Generate n_samples evenly-spaced points in [0, 1]
+        bins = np.arange(n_samples) / n_samples
+        # Random offset within each bin [i/n, (i+1)/n]
+        offsets = np.random.rand(n_samples) / n_samples
+        samples[:, d] = bins + offsets
+        # Shuffle to randomize order (standard LHS)
+        np.random.shuffle(samples[:, d])
+    
+    # Map from [0, 1] to [-1, 1]
+    samples = 2.0 * samples - 1.0
+    
+    return samples
+
+
 class BatchedGPUQPSolver:
     """
     Batched QP solver using ADMM on GPU via PyTorch.
@@ -187,7 +224,20 @@ class BatchedGPUQPSolver:
             # Generate per-batch perturbations δq: (B, n)
             delta_q = torch.zeros(B, n, dtype=dt, device=dev)
             # Instance 0: no perturbation (exact original problem)
-            delta_q[1:] = q_perturb_sigma * torch.randn(B - 1, n, dtype=dt, device=dev)
+            
+            # Split remaining instances: ~25% Latin Hypercube Sampling, ~75% Gaussian
+            n_lhs = max(1, int(0.25 * (B - 1)))
+            n_gaussian = (B - 1) - n_lhs
+            
+            # LHS samples: uniform coverage of [-1, 1]^n configuration space
+            if n_lhs > 0:
+                lhs_samples = _generate_lhs_samples(n_lhs, n)
+                delta_q[1:1+n_lhs] = q_perturb_sigma * torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
+            
+            # Gaussian samples: tiered exploration around warm start (if available)
+            if n_gaussian > 0:
+                delta_q[1+n_lhs:] = q_perturb_sigma * torch.randn(n_gaussian, n, dtype=dt, device=dev)
+            
             # Apply per-DOF dampening
             if perturb_dampen is not None:
                 dampen_t = torch.as_tensor(
@@ -235,13 +285,16 @@ class BatchedGPUQPSolver:
         if x_center is not None:
             # Tiered randomization strategy:
             #   Tier 0 (1):    exact warm start (exploitation)
-            #   Tier 1 (~25%): σ=0.01  (fine local search)
-            #   Tier 2 (~25%): σ=0.05  (medium exploration)
-            #   Tier 3 (~25%): σ=0.15  (broad exploration)
+            #   Tier 1 (~20%): σ=0.01  (fine local search)
+            #   Tier 2 (~20%): σ=0.05  (medium exploration)
+            #   Tier 3 (~20%): σ=0.15  (broad exploration)
+            #   Tier LHS (~20%): Latin Hypercube sampling (workspace distributed)
             #   Tier 4 (rest): σ=0.40  (wide exploration to escape local minima)
             x[0] = x_center
             idx = 1
-            tier_fracs = [0.25, 0.25, 0.25]          # tiers 1-3
+            
+            # Gaussian tiered: 20% each for fine/medium/broad
+            tier_fracs = [0.20, 0.20, 0.20]
             tier_sigmas = [0.01, 0.05, 0.15]
             for frac, sig in zip(tier_fracs, tier_sigmas):
                 cnt = max(1, int(B * frac))
@@ -250,11 +303,34 @@ class BatchedGPUQPSolver:
                     x[idx:end] = x_center + sig * torch.randn(
                         end - idx, n, dtype=dt, device=dev)
                 idx = end
+            
+            # Latin Hypercube: ~20% for distributed workspace exploration
+            n_lhs_warmstart = max(1, int(B * 0.20))
+            end = min(idx + n_lhs_warmstart, B)
+            if idx < end:
+                lhs_samples = _generate_lhs_samples(end - idx, n)
+                # Scale LHS to add meaningful diversity around warm start
+                lhs_tensor = torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
+                x[idx:end] = x_center + 0.25 * lhs_tensor  # Moderate scaling
+                idx = end
+            
+            # Remaining: wide Gaussian exploration
             if idx < B:
                 x[idx:] = x_center + 0.40 * torch.randn(
                     B - idx, n, dtype=dt, device=dev)
         else:
-            x.normal_(0, 0.1)
+            # No warm start: mix Gaussian (50%) and LHS (50%) directly
+            n_lhs_direct = max(1, int(B * 0.50))
+            n_gaussian_direct = B - n_lhs_direct
+            
+            # LHS samples
+            if n_lhs_direct > 0:
+                lhs_samples = _generate_lhs_samples(n_lhs_direct, n)
+                x[:n_lhs_direct] = 0.15 * torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
+            
+            # Gaussian samples
+            if n_gaussian_direct > 0:
+                x[n_lhs_direct:] = 0.10 * torch.randn(n_gaussian_direct, n, dtype=dt, device=dev)
 
         # ── Initialize ADMM dual variables ───────────────────────────────
         if do_q_perturb:

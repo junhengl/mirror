@@ -46,8 +46,8 @@ class RetargetingNode:
         self.robot = Robot()
         
         # Robot dimensions
-        self.hand_r_offset = np.array([0.0, -0.008, 0.0], dtype=np.float64)
-        self.hand_l_offset = np.array([0.0, 0.008, 0.0], dtype=np.float64)
+        self.hand_r_offset = np.array([0.0, -0.08, 0.0], dtype=np.float64)
+        self.hand_l_offset = np.array([0.0, 0.08, 0.0], dtype=np.float64)
         self.elbow_r_offset = np.array([0.0, -0.0, 0.0], dtype=np.float64)
         self.elbow_l_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         
@@ -58,8 +58,8 @@ class RetargetingNode:
         self.Xelbow_r = Xtrans(self.elbow_r_offset)
         
         # Link indices
-        self.hand_r_link = 23
-        self.hand_l_link = 30
+        self.hand_r_link = 22
+        self.hand_l_link = 29
         self.elbow_r_link = 21
         self.elbow_l_link = 28
         
@@ -69,6 +69,19 @@ class RetargetingNode:
         
         # COM desired
         self.com_des = np.zeros(6, dtype=np.float64)
+        
+        # Reference pose tracking (for regularization toward favorable configuration)
+        self.q_ref = self.retarget_config.q_ref
+        if self.q_ref is None:
+            # Default favorable pose: arms relaxed, palms facing down
+            # [base_6DOF, right_arm_7DOF, left_arm_7DOF]
+            self.q_ref = np.array([
+                0.0, 0.0, 1.3,                    # base: xy center, z at hanging height
+                0.0, 0.0, 0.0,                    # base: rpy neutral
+                0.0, -1.75, 1.57, 1.57, 0.0, -0.5, 0.0,  # right arm: relaxed
+                0.0, -1.75, 1.57, 1.57, 0.0, -0.5, 0.0,  # left arm: relaxed
+            ], dtype=np.float64)
+        self.w_ref = self.retarget_config.w_ref
         
         # Last valid tracking data
         self.last_valid_tracking: Optional[ArmTrackingData] = None
@@ -89,7 +102,7 @@ class RetargetingNode:
         self.last_stats_time = time.time()
         self.iteration_count = 0
         
-        print("[Retargeting] Node initialized")
+        print(f"[Retargeting] Node initialized (reference pose tracking weight: {self.w_ref})")
     
     def start(self):
         """Start retargeting thread."""
@@ -224,7 +237,12 @@ class RetargetingNode:
         hand_r_mat, hand_r_rpy = direction_to_rotation(
             left_elbow_robot * scale, left_wrist_robot * scale)
         
-        print(f"[Retargeting] Transformed ZED to robot frame: hand_l_rpy={np.degrees(hand_l_rpy)}, hand_r_rpy={np.degrees(hand_r_rpy)}")
+        # print(f"[Retargeting] Transformed ZED to robot frame: hand_l_rpy={np.degrees(hand_l_rpy)}, hand_r_rpy={np.degrees(hand_r_rpy)}")
+        
+        hand_l_rpy *= 0
+        hand_r_rpy *= 0
+        # hand_l_rpy[0] = 1.78
+        # hand_r_rpy[0] = 1.78
         
         # Build desired task-space vectors [orientation(3), position(3)]
         return {
@@ -274,31 +292,22 @@ class RetargetingNode:
         q_current[6:6+28] = feedback.q
         dq_current = np.zeros(self.themis_const.DOF, dtype=np.float64)
         dq_current[6:6+28] = feedback.dq
-
-        q_offset = np.array([
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # floating base
-            0.0, 0.0, -0.1, 0.1, -0.1, 0.0,  # right leg
-            0.0, 0.0, -0.1, 0.1, -0.1, 0.0,  # left leg
-            0, 0.1, 0, 0.1, 0.0, 0.1, 0,  # right arm
-            0, -0.1, 0, -0.1, 0.0, -0.1, 0,  # left arm
-            0.0, 0.0  # head
-        ], dtype=np.float32)
         
         # IK iterations
         for _ in range(self.retarget_config.num_ik_iterations):
-            self.robot.update(q_current+q_offset*0.00, dq_current)
+            self.robot.update(q_current, dq_current)
             
             # Compute FK and Jacobians for hands and elbows
-            x_hand_r, J_hand_r = self.robot.compute_forward_kinematics(self.hand_r_link, self.hand_r_offset)
-            x_hand_l, J_hand_l = self.robot.compute_forward_kinematics(self.hand_l_link, self.hand_l_offset)
-            x_elbow_r, J_elbow_r = self.robot.compute_forward_kinematics(self.elbow_r_link, self.elbow_r_offset)
-            x_elbow_l, J_elbow_l = self.robot.compute_forward_kinematics(self.elbow_l_link, self.elbow_l_offset)
+            x_hand_r = self.robot.compute_forward_kinematics(self.hand_r_link, self.hand_r_offset)
+            x_hand_l = self.robot.compute_forward_kinematics(self.hand_l_link, self.hand_l_offset)
+            x_elbow_r = self.robot.compute_forward_kinematics(self.elbow_r_link, self.elbow_r_offset)
+            x_elbow_l = self.robot.compute_forward_kinematics(self.elbow_l_link, self.elbow_l_offset)
             
-            # # Compute Jacobians
-            # J_hand_r = self.robot.compute_body_jacobian(self.hand_r_link, self.Xhand_r)
-            # J_hand_l = self.robot.compute_body_jacobian(self.hand_l_link, self.Xhand_l)
-            # J_elbow_r = self.robot.compute_body_jacobian(self.elbow_r_link, self.Xelbow_r)
-            # J_elbow_l = self.robot.compute_body_jacobian(self.elbow_l_link, self.Xelbow_l)
+            # Compute Jacobians
+            J_hand_r = self.robot.compute_body_jacobian(self.hand_r_link, self.Xhand_r)
+            J_hand_l = self.robot.compute_body_jacobian(self.hand_l_link, self.Xhand_l)
+            J_elbow_r = self.robot.compute_body_jacobian(self.elbow_r_link, self.Xelbow_r)
+            J_elbow_l = self.robot.compute_body_jacobian(self.elbow_l_link, self.Xelbow_l)
             
             # timer for IK solve
             ik_start = time.perf_counter()
@@ -319,8 +328,10 @@ class RetargetingNode:
                         desired['x_hand_l_des'], desired['x_hand_r_des'], x_hand_l, x_hand_r,
                         J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
                         self.com_des,
-                        n_batch=4096, max_iter=20,
-                        q_perturb_sigma=0.0  # tunable
+                        n_batch=4096, max_iter=50,
+                        q_perturb_sigma=0.0,  # tunable
+                        q_ref=self.q_ref,
+                        w_ref=self.w_ref  # reference pose weight
             )
             ik_time = time.perf_counter() - ik_start
             self.shared.update_timing('ik_solve', ik_time)
@@ -360,10 +371,10 @@ class RetargetingNode:
         
         # Compute final FK for actual positions after IK
         self.robot.update(self.filtered_q, dq_current)
-        x_hand_r_act, _ = self.robot.compute_forward_kinematics(self.hand_r_link, self.hand_r_offset)
-        x_hand_l_act, _ = self.robot.compute_forward_kinematics(self.hand_l_link, self.hand_l_offset)
-        x_elbow_r_act, _ = self.robot.compute_forward_kinematics(self.elbow_r_link, self.elbow_r_offset)
-        x_elbow_l_act, _ = self.robot.compute_forward_kinematics(self.elbow_l_link, self.elbow_l_offset)
+        x_hand_r_act = self.robot.compute_forward_kinematics(self.hand_r_link, self.hand_r_offset)
+        x_hand_l_act = self.robot.compute_forward_kinematics(self.hand_l_link, self.hand_l_offset)
+        x_elbow_r_act = self.robot.compute_forward_kinematics(self.elbow_r_link, self.elbow_r_offset)
+        x_elbow_l_act = self.robot.compute_forward_kinematics(self.elbow_l_link, self.elbow_l_offset)
         
         # Build output
         output.valid = True

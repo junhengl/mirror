@@ -6,7 +6,7 @@ Defines rates, gains, and shared parameters across all nodes.
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -52,11 +52,15 @@ class RetargetingConfig:
     num_ik_iterations: int = 1
     
     # Arm scale factor (human -> robot)
-    arm_scale: float = 0.9
+    arm_scale: float = 1.0
     
     # IK weights
     position_weight: float = 100.0
     regularization_weight: float = 0.1
+    
+    # Reference pose tracking (for favorable pose regularization)
+    w_ref: float = 10.0  # Weight on reference pose tracking (0 = disabled)
+    q_ref: Optional[np.ndarray] = None  # Reference pose vector (DOF,)
 
 
 @dataclass
@@ -69,7 +73,7 @@ class TrackingConfig:
     min_confidence: float = 30.0
     
     # Filter parameters
-    filter_alpha: float = 0.2
+    filter_alpha: float = 0.8
     jump_threshold: float = 0.12  # meters
 
 

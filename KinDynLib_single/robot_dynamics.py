@@ -250,9 +250,9 @@ class Robot:
         
         # Compute Jacobian
         Xend = Xtrans(contact_offset)
-        J = self.compute_body_jacobian(end_effector_index, Xend)
+        # J = self.compute_body_jacobian(end_effector_index, Xend)
         
-        return rpypos, J
+        return rpypos
     
     def update_task_space_command_with_constraints(self, 
                                                    x_elbow_l_des, x_elbow_r_des,
@@ -1516,7 +1516,9 @@ class Robot:
                                                             com_des,
                                                             n_batch=128, max_iter=20,
                                                             q_perturb_sigma=0.0,
-                                                            pos_threshold=0.005):
+                                                            pos_threshold=0.005,
+                                                            q_ref=None,
+                                                            w_ref=0.0):
         """Distributed GPU-batched IK-QP: two independent 13-DOF QPs per arm.
         
         Decouples left/right arm tracking by solving separate (base 6 + arm 7
@@ -1528,11 +1530,14 @@ class Robot:
         its linearized tracking error is lower than the previous accepted
         solution. Otherwise the robot holds its current pose (dq=0).
         
+        Optionally tracks a reference (favorable) pose with weighted cost.
+        
         This combines the benefits of:
           - Distributed solving (no cross-arm interference)
           - GPU-batched ADMM (parallel local-minima exploration)
           - Q-perturbation (different linearization points)
           - Ratchet (monotonic tracking improvement when target is static)
+          - Reference pose tracking (regularization toward favorable config)
         
         Args:
             x_{elbow,hand}_{l,r}_des: (6,) desired task-space poses [rpy, xyz]
@@ -1543,6 +1548,11 @@ class Robot:
             max_iter: ADMM iterations per solve (default 20)
             q_perturb_sigma: float >= 0, randomize feedback q per batch
                 instance to explore different linearization points (default 0)
+            pos_threshold: float, max position change (m) in desired EE targets
+                below which the ratchet engages (default 0.005 = 5 mm).
+                Set to 0 to always accept.
+            q_ref: (DOF,) optional reference pose for tracking (None = no tracking)
+            w_ref: float >= 0, weight on reference pose tracking (default 0 = disabled)
             pos_threshold: float, max position change (m) in desired EE targets
                 below which the ratchet engages (default 0.005 = 5 mm).
                 Set to 0 to always accept.
@@ -1591,8 +1601,8 @@ class Robot:
         # =====================================================================
         # Weights (matching distributed ProxQP version)
         # =====================================================================
-        We = 0.1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
-        Wh = np.diag([1.0, 1.0, 1.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        We = .1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 1*np.diag([1.0, 1.0, 1.0, 100.0, 100.0, 100.0]).astype(np.float64)
         Wc = np.eye(6, dtype=np.float64) * 5000
         Wq_val = 10.0
         
@@ -1626,25 +1636,35 @@ class Robot:
         head_pos = q_fb[:3] + head_offset
         crotch_pos = q_fb[:3] + crotch_offset
         
-        r_torso, r_head, r_crotch = 0.13, 0.11, 0.16
+        r_torso, r_head, r_crotch = 0.15, 0.13, 0.19
         rho_torso = r_torso + 0.02
         rho_head = r_head + 0.02
         rho_crotch = r_crotch + 0.02
         lambda_cbf = 0.5
         
         def _build_arm_qp(dof_indices, J_elbow, J_hand, e_elbow, e_hand,
-                          x_elbow, x_hand, Wc_arm):
-            """Build the QP matrices for one arm (13 DOF)."""
+                          x_elbow, x_hand, Wc_arm, q_ref_arm=None, w_ref_arm=0.0):
+            """Build the QP matrices for one arm (13 DOF).
+            
+            Args:
+                q_ref_arm: (13,) reference pose for this arm (base 6 + arm 7), or None
+                w_ref_arm: weight on reference pose tracking cost
+            """
             J_elbow_sub = J_elbow[:, dof_indices]
             J_hand_sub = J_hand[:, dof_indices]
             J_com_sub = J_com_full[:, dof_indices]
             Wq_sub = np.eye(n_sub, dtype=np.float64) * Wq_val
             
+            # Add reference pose regularization to Wq if enabled
+            Wq_with_ref = Wq_sub.copy()
+            if w_ref_arm > 0 and q_ref_arm is not None:
+                Wq_with_ref += np.eye(n_sub, dtype=np.float64) * w_ref_arm
+            
             # Hessian
             H = (J_elbow_sub.T @ We @ J_elbow_sub +
                  J_hand_sub.T @ Wh @ J_hand_sub +
                  J_com_sub.T @ Wc_arm @ J_com_sub +
-                 Wq_sub)
+                 Wq_with_ref)
             H = 0.5 * (H + H.T)
             H += np.eye(n_sub) * 1e-6
             
@@ -1654,12 +1674,21 @@ class Robot:
                 H = np.eye(n_sub, dtype=np.float64) * 1e-3  # Fallback to identity
             
             # Task-only Hessian (for q-perturbation g correction)
-            H_task = H - Wq_sub - np.eye(n_sub) * 1e-6
+            H_task = H - Wq_with_ref - np.eye(n_sub) * 1e-6
             
-            # Linear term
+            # Linear term: standard tracking errors
             g = -(J_elbow_sub.T @ We @ e_elbow +
                   J_hand_sub.T @ Wh @ e_hand +
                   J_com_sub.T @ Wc_arm @ e_com)
+            
+            # Add reference pose tracking term to linear cost
+            if w_ref_arm > 0 and q_ref_arm is not None:
+                # Current position relative to reference: q - q_ref
+                q_fb_arm = q_fb[dof_indices]
+                q_ref_feedback = q_ref_arm.astype(np.float64)
+                # Linear term for minimizing (q - q_ref)^2 is -2 * w_ref * (q_ref - q)
+                # which we add as Wq_ref @ (q_ref - q_fb_arm)
+                g += -w_ref_arm * q_ref_feedback + w_ref_arm * q_fb_arm
             
             # Check for NaN/Inf in gradient
             if not np.all(np.isfinite(g)):
@@ -1714,13 +1743,22 @@ class Robot:
         # =====================================================================
         # Build and solve QPs (fused block-diagonal for 2× speedup)
         # =====================================================================
+        # Extract reference pose for each arm if provided
+        q_ref_r = None
+        q_ref_l = None
+        if q_ref is not None:
+            q_ref = np.asarray(q_ref, dtype=np.float64)
+            if q_ref.shape[0] == DOF:
+                q_ref_r = q_ref[right_dofs]
+                q_ref_l = q_ref[left_dofs]
+        
         H_r, g_r, C_r, l_r, u_r, Ht_r = _build_arm_qp(
             right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
-            x_elbow_r, x_hand_r, Wc)
+            x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
         
         H_l, g_l, C_l, l_l, u_l, Ht_l = _build_arm_qp(
             left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
-            x_elbow_l, x_hand_l, Wc)
+            x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
         
         # Warm start from previous fused solution (split back to per-arm)
         fused_solver = self._gpu_qp_solver_right  # reuse field for fused solver
