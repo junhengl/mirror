@@ -392,17 +392,18 @@ class Robot:
         # Task space weights (for ||J*dq - e||^2_W)
         # =====================================================================
         # Elbow weight matrix (6x6: orientation + position)
-        We = 10*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)  # position only
-        
-        # Hand weight matrix (6x6: orientation + position)
-        Wh = 0*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)  # position only
+        # We = 10*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)  # position only
+        We = .1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 1*np.diag([1.0, 1.0, 1.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        # # Hand weight matrix (6x6: orientation + position)
+        # Wh = 0*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)  # position only
         
         # COM weight matrix (6x6)
-        Wc = np.eye(6, dtype=np.float64) * 50000
+        Wc = np.eye(6, dtype=np.float64) * 5000
         
         # Joint regularization weight (for ||dq||^2_Wq)
         # Must be much smaller than task weights for good tracking
-        Wq = np.eye(DOF, dtype=np.float64) * 100
+        Wq = np.eye(DOF, dtype=np.float64) * 10
         Wq[:6, :6] = 0  # no regularization on floating base (it's fixed anyway)
         
         # Nominal pose attraction weight (for ||q - q_nom||^2_Wq_nom)
@@ -880,11 +881,13 @@ class Robot:
         left_dofs = np.concatenate([BASE_DOFS, LEFT_ARM_DOFS])
         
         # Weights: right arm gets primary COM control, left arm gets secondary
-        We = 0*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
-        Wh = 10*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        # We = 0*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        # Wh = 10*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        We = .1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 1*np.diag([1.0, 1.0, 1.0, 100.0, 100.0, 100.0]).astype(np.float64)
         Wc_primary = np.eye(6, dtype=np.float64) * 5000
         Wc_secondary = np.eye(6, dtype=np.float64) * 5000
-        Wq_diag = np.ones(DOF, dtype=np.float64) * 100
+        Wq_diag = np.ones(DOF, dtype=np.float64) * 10
         Wq_diag[:6] = 0
         
         # Current state
@@ -1313,10 +1316,12 @@ class Robot:
         # =====================================================================
         # Task-space weights
         # =====================================================================
-        We = np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
-        Wh = 2*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        # We = np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        # Wh = 2*np.diag([0.0, 0.0, 0.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        We = .1*np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 1*np.diag([1.0, 1.0, 1.0, 100.0, 100.0, 100.0]).astype(np.float64)
         Wc = np.eye(6, dtype=np.float64) * 5000
-        Wq = np.eye(DOF, dtype=np.float64) * 50
+        Wq = np.eye(DOF, dtype=np.float64) * 10
         Wq[:6, :6] = 0  # no regularization on floating base
         
         # =====================================================================
@@ -1752,34 +1757,109 @@ class Robot:
                 q_ref_r = q_ref[right_dofs]
                 q_ref_l = q_ref[left_dofs]
         
-        H_r, g_r, C_r, l_r, u_r, Ht_r = _build_arm_qp(
-            right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
-            x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
-        
-        H_l, g_l, C_l, l_l, u_l, Ht_l = _build_arm_qp(
-            left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
-            x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
-        
-        # Warm start from previous fused solution (split back to per-arm)
         fused_solver = self._gpu_qp_solver_right  # reuse field for fused solver
-        x_warm_r = None
-        x_warm_l = None
-        if (fused_solver._prev_best is not None
-                and fused_solver._prev_n == 2 * n_sub):
-            prev = fused_solver._prev_best.cpu().numpy()
-            x_warm_r = prev[:n_sub]
-            x_warm_l = prev[n_sub:]
-        
-        # Solve both arms as a single fused block-diagonal QP
-        dq_right, dq_left = BatchedGPUQPSolver.solve_pair(
-            fused_solver,
-            H_r, g_r, C_r, l_r, u_r,
-            H_l, g_l, C_l, l_l, u_l,
-            x_warm_a=x_warm_r, x_warm_b=x_warm_l,
-            q_perturb_sigma=q_perturb_sigma,
-            n_box_a=n_sub, n_box_b=n_sub,
-            H_task_a=Ht_r, H_task_b=Ht_l
-        )
+        q_perturb_sigma = 0.1
+        if q_perturb_sigma > 0:
+            # ─── Task-space perturbation ──────────────────────────────────
+            # Instead of perturbing q (which requires FK recomputation),
+            # perturb the task-space feedback (x_elbow, x_hand) directly.
+            # This creates diverse QP problems (different g, CBF constraints)
+            # while sharing the same Hessian H (Jacobians unchanged).
+            # A small set of linearizations is solved with the full GPU
+            # batch, and the best is selected on the nominal QP.
+            N_LIN = 8  # Number of diverse task-space linearizations
+            
+            g_r_list, C_r_list, l_r_list, u_r_list = [], [], [], []
+            g_l_list, C_l_list, l_l_list, u_l_list = [], [], [], []
+            H_r_nom, H_l_nom = None, None
+            Ht_r_nom, Ht_l_nom = None, None
+            
+            for i in range(N_LIN):
+                if i == 0:
+                    # Instance 0: nominal (no perturbation)
+                    x_el_p, x_er_p = x_elbow_l, x_elbow_r
+                    x_hl_p, x_hr_p = x_hand_l, x_hand_r
+                else:
+                    # Perturb position components [3:6] of task-space feedback
+                    # Orientation [0:3] left unperturbed (small rotations are
+                    # hard to meaningfully randomize and the cost weights them
+                    # much less than position)
+                    sigma_pos = q_perturb_sigma  # metres
+                    
+                    x_el_p = x_elbow_l.copy().astype(np.float64)
+                    x_er_p = x_elbow_r.copy().astype(np.float64)
+                    x_hl_p = x_hand_l.copy().astype(np.float64)
+                    x_hr_p = x_hand_r.copy().astype(np.float64)
+                    
+                    x_el_p[3:] += np.random.randn(3) * sigma_pos
+                    x_er_p[3:] += np.random.randn(3) * sigma_pos
+                    x_hl_p[3:] += np.random.randn(3) * sigma_pos
+                    x_hr_p[3:] += np.random.randn(3) * sigma_pos
+                
+                # Errors at (possibly perturbed) task-space state
+                e_el_i = (x_elbow_l_des - x_el_p).astype(np.float64)
+                e_er_i = (x_elbow_r_des - x_er_p).astype(np.float64)
+                e_hl_i = (x_hand_l_des - x_hl_p).astype(np.float64)
+                e_hr_i = (x_hand_r_des - x_hr_p).astype(np.float64)
+                
+                H_r_i, g_r_i, C_r_i, l_r_i, u_r_i, Ht_r_i = _build_arm_qp(
+                    right_dofs, J_elbow_r, J_hand_r, e_er_i, e_hr_i,
+                    x_er_p, x_hr_p, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
+                H_l_i, g_l_i, C_l_i, l_l_i, u_l_i, Ht_l_i = _build_arm_qp(
+                    left_dofs, J_elbow_l, J_hand_l, e_el_i, e_hl_i,
+                    x_el_p, x_hl_p, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
+                
+                if i == 0:
+                    H_r_nom, H_l_nom = H_r_i, H_l_i
+                    Ht_r_nom, Ht_l_nom = Ht_r_i, Ht_l_i
+                
+                g_r_list.append(g_r_i)
+                C_r_list.append(C_r_i)
+                l_r_list.append(l_r_i)
+                u_r_list.append(u_r_i)
+                g_l_list.append(g_l_i)
+                C_l_list.append(C_l_i)
+                l_l_list.append(l_l_i)
+                u_l_list.append(u_l_i)
+            
+            # All linearizations share the same H and C — only g and
+            # CBF bounds differ.  Use C from the nominal (index-0) QP.
+            dq_right, dq_left = BatchedGPUQPSolver.solve_pair_multi_lin(
+                fused_solver,
+                H_r_nom, H_l_nom,
+                g_r_list, l_r_list, u_r_list,
+                g_l_list, l_l_list, u_l_list,
+                C_r=C_r_list[0], C_l=C_l_list[0],
+                n_box_a=n_sub, n_box_b=n_sub
+            )
+        else:
+            # ─── No perturbation: single QP at nominal configuration ─────
+            H_r, g_r, C_r, l_r, u_r, Ht_r = _build_arm_qp(
+                right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
+                x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
+            
+            H_l, g_l, C_l, l_l, u_l, Ht_l = _build_arm_qp(
+                left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
+                x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
+            
+            # Warm start from previous fused solution
+            x_warm_r = None
+            x_warm_l = None
+            if (fused_solver._prev_best is not None
+                    and fused_solver._prev_n == 2 * n_sub):
+                prev = fused_solver._prev_best.cpu().numpy()
+                x_warm_r = prev[:n_sub]
+                x_warm_l = prev[n_sub:]
+            
+            dq_right, dq_left = BatchedGPUQPSolver.solve_pair(
+                fused_solver,
+                H_r, g_r, C_r, l_r, u_r,
+                H_l, g_l, C_l, l_l, u_l,
+                x_warm_a=x_warm_r, x_warm_b=x_warm_l,
+                q_perturb_sigma=0.0,
+                n_box_a=n_sub, n_box_b=n_sub,
+                H_task_a=Ht_r, H_task_b=Ht_l
+            )
         
         # Check for NaN/Inf in solver output
         if (not np.all(np.isfinite(dq_right)) or not np.all(np.isfinite(dq_left))):

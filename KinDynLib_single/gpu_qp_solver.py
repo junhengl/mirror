@@ -37,19 +37,30 @@ except ImportError:
 
 def _generate_lhs_samples(n_samples: int, n_dims: int, seed: Optional[int] = None) -> np.ndarray:
     """
-    Generate Latin Hypercube Samples (LHS).
+    Generate Latin Hypercube Samples (LHS) for configuration space exploration.
     
-    Ensures uniform marginal coverage along each dimension while maintaining
-    diversity. Returns samples in [-1, 1]^n_dims, ready to be scaled by
-    perturbation sigma and dampening factors.
+    LHS ensures uniform marginal coverage along each dimension while maintaining
+    diversity across samples. Each dimension is partitioned into n_samples bins,
+    with exactly one sample placed randomly within each bin. The bins are then
+    shuffled independently per dimension, ensuring no two samples share the same
+    bin in any dimension.
+    
+    This is superior to pure Gaussian sampling for parallel IK because:
+      1. Guarantees uniform coverage of the entire configuration space
+      2. Avoids clustering around the center (better local minima escape)
+      3. Provides deterministic exploration quality (no unlucky Gaussian draws)
+    
+    From PDF pages 2-3: "Use LHS to ensure diverse linearization points across
+    the configuration space, improving the probability of finding the global
+    optimum within a fixed batch size."
     
     Args:
-        n_samples: Number of LHS samples to generate
-        n_dims: Dimensionality (DOF count, typically 13 for distributed arm or 34 for full)
-        seed: Random seed for reproducibility
+        n_samples: Number of LHS samples to generate (batch size)
+        n_dims: Dimensionality (DOF count: 13 for distributed arm, 34 for full)
+        seed: Random seed for reproducibility (optional)
     
     Returns:
-        samples: (n_samples, n_dims) numpy array in [-1, 1]
+        samples: (n_samples, n_dims) numpy array in [-1, 1] (ready for scaling)
     """
     if seed is not None:
         np.random.seed(seed)
@@ -214,6 +225,8 @@ class BatchedGPUQPSolver:
         u_t = u_t.clamp(max=1e8)
 
         # ── Q-perturbation setup ─────────────────────────────────────────
+        # Strategy from PDF: Use LHS for uniform configuration space sampling,
+        # with proper per-DOF dampening to avoid large base perturbations
         if do_q_perturb:
             # H_task for the linearized g correction: g_b = g + H_task @ δq_b
             if H_task is not None:
@@ -225,28 +238,31 @@ class BatchedGPUQPSolver:
             delta_q = torch.zeros(B, n, dtype=dt, device=dev)
             # Instance 0: no perturbation (exact original problem)
             
-            # Split remaining instances: ~25% Latin Hypercube Sampling, ~75% Gaussian
-            n_lhs = max(1, int(0.25 * (B - 1)))
+            # Split: 50% LHS (uniform coverage) + 50% Gaussian (near-optimal exploration)
+            n_lhs = max(1, int(0.50 * (B - 1)))
             n_gaussian = (B - 1) - n_lhs
             
-            # LHS samples: uniform coverage of [-1, 1]^n configuration space
+            # LHS samples: uniform marginal coverage in each DOF dimension
             if n_lhs > 0:
                 lhs_samples = _generate_lhs_samples(n_lhs, n)
                 delta_q[1:1+n_lhs] = q_perturb_sigma * torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
             
-            # Gaussian samples: tiered exploration around warm start (if available)
+            # Gaussian samples: concentrated around current config for fine-tuning
             if n_gaussian > 0:
                 delta_q[1+n_lhs:] = q_perturb_sigma * torch.randn(n_gaussian, n, dtype=dt, device=dev)
             
-            # Apply per-DOF dampening
+            # Apply per-DOF dampening BEFORE using delta_q (critical for effectiveness)
             if perturb_dampen is not None:
                 dampen_t = torch.as_tensor(
                     np.ascontiguousarray(perturb_dampen), dtype=dt, device=dev)
                 delta_q *= dampen_t  # (B, n) * (n,) broadcast
             else:
-                # Default: dampen floating-base DOFs 0-5
-                delta_q[:, :3] *= 0.1   # dampen base translation perturbation
-                delta_q[:, 3:6] *= 0.3  # dampen base orientation perturbation
+                # Default: heavily dampen floating-base DOFs to maintain stability
+                # Base translation (DOFs 0-2): small perturbations only
+                delta_q[:, :3] *= 0.05
+                # Base orientation (DOFs 3-5): moderate perturbations
+                delta_q[:, 3:6] *= 0.20
+                # Joint DOFs (6+): full perturbation magnitude
 
             # Per-batch g: g_b = g + H_task @ δq_b → (B, n)
             g_batch = g_t.unsqueeze(0) + delta_q @ Ht.T  # (B, n)
@@ -271,6 +287,8 @@ class BatchedGPUQPSolver:
         K_inv = torch.linalg.inv(K)                     # (n, n)  — O(n^3), tiny
 
         # ── Generate randomized warm starts (B, n) ───────────────────────
+        # Strategy from PDF (pages 2-3): Mix exploitation (warm start) with
+        # exploration (LHS + multi-tier Gaussian)
         x = torch.zeros(B, n, dtype=dt, device=dev)
 
         # Determine the center for warm starts
@@ -283,54 +301,56 @@ class BatchedGPUQPSolver:
             x_center = None
 
         if x_center is not None:
-            # Tiered randomization strategy:
-            #   Tier 0 (1):    exact warm start (exploitation)
-            #   Tier 1 (~20%): σ=0.01  (fine local search)
-            #   Tier 2 (~20%): σ=0.05  (medium exploration)
-            #   Tier 3 (~20%): σ=0.15  (broad exploration)
-            #   Tier LHS (~20%): Latin Hypercube sampling (workspace distributed)
-            #   Tier 4 (rest): σ=0.40  (wide exploration to escape local minima)
+            # Tiered randomization strategy (from PDF):
+            #   Tier 0 (1 sample):    exact warm start (pure exploitation)
+            #   Tier 1 (~25% LHS):    Latin Hypercube (uniform exploration)
+            #   Tier 2 (~15%):        σ=0.01 fine local (near warm start)
+            #   Tier 3 (~20%):        σ=0.10 medium (moderate exploration)
+            #   Tier 4 (~20%):        σ=0.30 broad (wide search)
+            #   Tier 5 (rest):        σ=0.60 very wide (escape local minima)
             x[0] = x_center
             idx = 1
             
-            # Gaussian tiered: 20% each for fine/medium/broad
-            tier_fracs = [0.20, 0.20, 0.20]
-            tier_sigmas = [0.01, 0.05, 0.15]
+            # LHS tier: 25% of batch for uniform configuration space coverage
+            n_lhs = max(1, int((B - 1) * 0.25))
+            end = min(idx + n_lhs, B)
+            if idx < end:
+                lhs_samples = _generate_lhs_samples(end - idx, n)
+                lhs_tensor = torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
+                # Scale LHS samples: moderate spread around warm start
+                x[idx:end] = x_center + 0.20 * lhs_tensor
+                idx = end
+            
+            # Gaussian tiers: fine/medium/broad/very-wide
+            tier_fracs = [0.15, 0.20, 0.20]  # Remaining ~40% goes to tier 5
+            tier_sigmas = [0.01, 0.10, 0.30]
             for frac, sig in zip(tier_fracs, tier_sigmas):
-                cnt = max(1, int(B * frac))
+                cnt = max(1, int((B - 1) * frac))
                 end = min(idx + cnt, B)
                 if idx < end:
                     x[idx:end] = x_center + sig * torch.randn(
                         end - idx, n, dtype=dt, device=dev)
                 idx = end
             
-            # Latin Hypercube: ~20% for distributed workspace exploration
-            n_lhs_warmstart = max(1, int(B * 0.20))
-            end = min(idx + n_lhs_warmstart, B)
-            if idx < end:
-                lhs_samples = _generate_lhs_samples(end - idx, n)
-                # Scale LHS to add meaningful diversity around warm start
-                lhs_tensor = torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
-                x[idx:end] = x_center + 0.25 * lhs_tensor  # Moderate scaling
-                idx = end
-            
-            # Remaining: wide Gaussian exploration
+            # Remaining: very wide Gaussian exploration (escape local minima)
             if idx < B:
-                x[idx:] = x_center + 0.40 * torch.randn(
+                x[idx:] = x_center + 0.60 * torch.randn(
                     B - idx, n, dtype=dt, device=dev)
         else:
-            # No warm start: mix Gaussian (50%) and LHS (50%) directly
-            n_lhs_direct = max(1, int(B * 0.50))
+            # No warm start: use hybrid LHS (60%) + Gaussian (40%)
+            # LHS provides uniform coverage without bias
+            n_lhs_direct = max(1, int(B * 0.60))
             n_gaussian_direct = B - n_lhs_direct
             
-            # LHS samples
             if n_lhs_direct > 0:
                 lhs_samples = _generate_lhs_samples(n_lhs_direct, n)
-                x[:n_lhs_direct] = 0.15 * torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
+                lhs_tensor = torch.from_numpy(lhs_samples).to(dtype=dt, device=dev)
+                # Moderate scaling for LHS when no warm start
+                x[:n_lhs_direct] = 0.25 * lhs_tensor
             
-            # Gaussian samples
             if n_gaussian_direct > 0:
-                x[n_lhs_direct:] = 0.10 * torch.randn(n_gaussian_direct, n, dtype=dt, device=dev)
+                # Gaussian as backup for additional diversity
+                x[n_lhs_direct:] = 0.20 * torch.randn(n_gaussian_direct, n, dtype=dt, device=dev)
 
         # ── Initialize ADMM dual variables ───────────────────────────────
         if do_q_perturb:
@@ -497,16 +517,19 @@ class BatchedGPUQPSolver:
             H_task_fused = blkdiag(H_task_a, H_task_b).astype(np.float64)
 
         # ── Per-DOF perturbation dampening for both bases ────────────────
+        # PDF pages 2-3: Dampen base translation heavily (0.05), orientation
+        # moderately (0.20), allow full perturbation on joint DOFs
         perturb_dampen = None
         if q_perturb_sigma > 0:
             n_fused = n_a + n_b
             perturb_dampen = np.ones(n_fused, dtype=np.float64)
             # Problem A base: DOFs 0:3 translation, 3:6 orientation
-            perturb_dampen[0:3] = 0.1
-            perturb_dampen[3:6] = 0.3
+            perturb_dampen[0:3] = 0.05   # Very small base translation perturbation
+            perturb_dampen[3:6] = 0.20   # Moderate base orientation perturbation
             # Problem B base: DOFs n_a:n_a+3 translation, n_a+3:n_a+6 orientation
-            perturb_dampen[n_a:n_a + 3] = 0.1
-            perturb_dampen[n_a + 3:n_a + 6] = 0.3
+            perturb_dampen[n_a:n_a + 3] = 0.05
+            perturb_dampen[n_a + 3:n_a + 6] = 0.20
+            # Joint DOFs (rest): full perturbation magnitude (1.0)
 
         # ── Single fused solve ───────────────────────────────────────────
         x_fused = solver.solve(
@@ -519,3 +542,165 @@ class BatchedGPUQPSolver:
         )
 
         return x_fused[:n_a], x_fused[n_a:]
+
+    @staticmethod
+    @torch.no_grad()
+    def solve_pair_multi_lin(solver: 'BatchedGPUQPSolver',
+                            H_r, H_l,
+                            g_r_list, l_r_list, u_r_list,
+                            g_l_list, l_l_list, u_l_list,
+                            C_r, C_l,
+                            n_box_a: int, n_box_b: int):
+        """Solve multiple task-space linearizations in a SINGLE GPU call.
+
+        All linearizations share the same H and C (Jacobians unchanged).
+        Only g and constraint bounds differ (from perturbed task-space
+        feedback).  The n_batch instances are partitioned across n_lin
+        linearizations, so each gets n_batch/n_lin warm-start diversity.
+        This costs the same as a single solve_pair() call.
+
+        Best solution is selected on the nominal (index-0) QP cost.
+
+        Args:
+            solver:     BatchedGPUQPSolver (defines n_batch, device, etc.).
+            H_r, H_l:   (n, n) Hessians (shared).
+            g_r/l_list:  Lists[ndarray] of length n_lin — per-lin linear costs.
+            l/u_r/l_list: Lists[ndarray] of length n_lin — per-lin bounds.
+            C_r, C_l:    (m, n) constraint matrices (shared).
+            n_box_a/b:   Number of leading box-constraint rows per sub-problem.
+
+        Returns:
+            (dq_right, dq_left): best (n_a,), (n_b,) numpy float32.
+        """
+        from scipy.linalg import block_diag as blkdiag
+
+        n_lin = len(g_r_list)
+        n_a, n_b = H_r.shape[0], H_l.shape[0]
+        m_a, m_b = C_r.shape[0], C_l.shape[0]
+        B = solver.n_batch
+        dt = solver.torch_dtype
+        dev = solver.device
+        rho = solver.rho
+        alph = solver.alpha
+
+        # ── Fuse block-diagonal (shared H, C) ────────────────────────────
+        H_fused = blkdiag(H_r, H_l).astype(np.float64)
+        n_cbf_a, n_cbf_b = m_a - n_box_a, m_b - n_box_b
+        Z = np.zeros
+        C_fused = np.vstack([
+            np.hstack([C_r[:n_box_a],  Z((n_box_a, n_b))]),
+            np.hstack([Z((n_box_b, n_a)), C_l[:n_box_b]]),
+            np.hstack([C_r[n_box_a:],  Z((n_cbf_a, n_b))]),
+            np.hstack([Z((n_cbf_b, n_a)), C_l[n_box_b:]]),
+        ]).astype(np.float64)
+        n_box_fused = n_box_a + n_box_b
+        n = n_a + n_b
+        m = C_fused.shape[0]
+
+        # ── Transfer to GPU ──────────────────────────────────────────────
+        H_t = torch.as_tensor(np.ascontiguousarray(H_fused), dtype=dt, device=dev)
+        C_t = torch.as_tensor(np.ascontiguousarray(C_fused), dtype=dt, device=dev)
+
+        # ── Build per-batch g and bounds from linearization lists ────────
+        # Partition batch: each lin gets B // n_lin instances
+        per_lin = B // n_lin
+
+        g_batch = torch.empty(B, n, dtype=dt, device=dev)
+        l_batch = torch.empty(B, m, dtype=dt, device=dev)
+        u_batch = torch.empty(B, m, dtype=dt, device=dev)
+
+        for k in range(n_lin):
+            s = k * per_lin
+            e = s + per_lin if k < n_lin - 1 else B
+            g_fused_k = np.concatenate([g_r_list[k], g_l_list[k]]).astype(np.float64)
+            l_fused_k = np.concatenate([
+                l_r_list[k][:n_box_a], l_l_list[k][:n_box_b],
+                l_r_list[k][n_box_a:], l_l_list[k][n_box_b:]
+            ]).astype(np.float64)
+            u_fused_k = np.concatenate([
+                u_r_list[k][:n_box_a], u_l_list[k][:n_box_b],
+                u_r_list[k][n_box_a:], u_l_list[k][n_box_b:]
+            ]).astype(np.float64)
+            g_batch[s:e] = torch.as_tensor(g_fused_k, dtype=dt, device=dev)
+            l_batch[s:e] = torch.as_tensor(l_fused_k, dtype=dt, device=dev).clamp(min=-1e8)
+            u_batch[s:e] = torch.as_tensor(u_fused_k, dtype=dt, device=dev).clamp(max=1e8)
+
+        # Nominal g, l, u (index-0) for final cost evaluation
+        g_nom = g_batch[0]              # (n,)
+        l_nom = l_batch[0]              # (m,)
+        u_nom = u_batch[0]              # (m,)
+
+        # ── KKT inverse (shared) ─────────────────────────────────────────
+        CtC = C_t.T @ C_t
+        K = H_t + rho * CtC
+        K = 0.5 * (K + K.T)
+        K.diagonal().add_(solver.sigma)
+        K_inv = torch.linalg.inv(K)
+
+        # ── Warm starts ──────────────────────────────────────────────────
+        x = torch.zeros(B, n, dtype=dt, device=dev)
+        x_center = None
+        if solver._prev_best is not None and solver._prev_n == n:
+            x_center = solver._prev_best
+
+        if x_center is not None:
+            x[0] = x_center
+            idx = 1
+            # LHS tier: 25%
+            n_lhs = max(1, int((B - 1) * 0.25))
+            end_idx = min(idx + n_lhs, B)
+            if idx < end_idx:
+                lhs = _generate_lhs_samples(end_idx - idx, n)
+                x[idx:end_idx] = x_center + 0.20 * torch.from_numpy(lhs).to(dtype=dt, device=dev)
+                idx = end_idx
+            for frac, sig in [(0.15, 0.01), (0.20, 0.10), (0.20, 0.30)]:
+                cnt = max(1, int((B - 1) * frac))
+                end_idx = min(idx + cnt, B)
+                if idx < end_idx:
+                    x[idx:end_idx] = x_center + sig * torch.randn(end_idx - idx, n, dtype=dt, device=dev)
+                    idx = end_idx
+            if idx < B:
+                x[idx:] = x_center + 0.60 * torch.randn(B - idx, n, dtype=dt, device=dev)
+        else:
+            n_lhs_d = max(1, int(B * 0.60))
+            lhs = _generate_lhs_samples(n_lhs_d, n)
+            x[:n_lhs_d] = 0.25 * torch.from_numpy(lhs).to(dtype=dt, device=dev)
+            if n_lhs_d < B:
+                x[n_lhs_d:] = 0.20 * torch.randn(B - n_lhs_d, n, dtype=dt, device=dev)
+
+        # ── ADMM variables ───────────────────────────────────────────────
+        Ct = C_t.T
+        Cx = x @ Ct
+        z = Cx.clamp(min=l_batch, max=u_batch)
+        u_dual = torch.zeros(B, m, dtype=dt, device=dev)
+
+        # ── ADMM iterations (per-batch g and bounds) ─────────────────────
+        M = rho * (K_inv @ C_t.T).T
+        x_offset = (-g_batch) @ K_inv       # (B, n)
+
+        for _ in range(solver.max_iter):
+            x = x_offset + (z - u_dual) @ M
+            Cx = x @ Ct
+            x_hat = alph * Cx + (1.0 - alph) * z
+            z_new = (x_hat + u_dual).clamp(min=l_batch, max=u_batch)
+            u_dual = u_dual + x_hat - z_new
+            z = z_new
+
+        # ── Select best on NOMINAL cost ──────────────────────────────────
+        Hx = x @ H_t
+        cost = 0.5 * (x * Hx).sum(dim=1) + (x * g_nom).sum(dim=1)
+        Cx_all = x @ Ct
+        lb_v = (l_nom - Cx_all).clamp(min=0)
+        ub_v = (Cx_all - u_nom).clamp(min=0)
+        viol = lb_v.pow(2).sum(dim=1) + ub_v.pow(2).sum(dim=1)
+        total = cost + 1e6 * viol
+
+        best = torch.argmin(total)
+        x_best = x[best]
+
+        solver._prev_best = x_best.clone()
+        solver._prev_n = n
+
+        dq_r = x_best[:n_a].cpu().numpy().astype(np.float32)
+        dq_l = x_best[n_a:].cpu().numpy().astype(np.float32)
+        return dq_r, dq_l

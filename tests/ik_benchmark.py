@@ -304,6 +304,145 @@ def compute_tracking_errors(robot: Robot, q_result: np.ndarray,
 # Solver wrappers (each resets state, runs N IK iterations, returns result)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _sqp_tracking_cost(robot: Robot, q: np.ndarray,
+                       x_hand_l_des, x_hand_r_des,
+                       x_elbow_l_des, x_elbow_r_des) -> float:
+    """Compute the sum of squared position tracking errors (scalar cost for line search)."""
+    dq_zero = np.zeros(DOF, dtype=np.float32)
+    robot.update(q, dq_zero)
+    x_hl = robot.compute_forward_kinematics(HAND_L_LINK, HAND_L_OFFSET)
+    x_hr = robot.compute_forward_kinematics(HAND_R_LINK, HAND_R_OFFSET)
+    x_el = robot.compute_forward_kinematics(ELBOW_L_LINK, ELBOW_L_OFFSET)
+    x_er = robot.compute_forward_kinematics(ELBOW_R_LINK, ELBOW_R_OFFSET)
+    cost = (np.sum((x_hl[3:] - x_hand_l_des[3:])**2)
+            + np.sum((x_hr[3:] - x_hand_r_des[3:])**2)
+            + np.sum((x_el[3:] - x_elbow_l_des[3:])**2)
+            + np.sum((x_er[3:] - x_elbow_r_des[3:])**2))
+    return float(cost)
+
+
+def run_global_ik_sqp(robot: Robot, q_init: np.ndarray,
+                      x_hand_l_des, x_hand_r_des,
+                      x_elbow_l_des, x_elbow_r_des,
+                      com_des: np.ndarray,
+                      max_outer_iters: int = 50,
+                      convergence_tol: float = 1e-6,
+                      ls_alpha_min: float = 0.01,
+                      ls_beta: float = 0.5,
+                      ls_max_trials: int = 10) -> TrialResult:
+    """Method 0: Global IK via Sequential QP (SQP with backtracking line search).
+
+    This solves the full nonlinear IK problem by repeatedly linearizing and
+    solving a local QP, then updating the configuration with a step size
+    chosen by backtracking line search:
+
+        for k = 1 … K:
+            1. Linearize at q_k  (compute FK, Jacobians)
+            2. Solve QP for δq   (same formulation as Single QP)
+            3. Line search: find α ∈ (0, 1] such that
+                  cost(q_k + α δq) < cost(q_k)
+               using backtracking: α ← β·α until improvement or α < α_min
+            4. Update: q_{k+1} = q_k + α δq
+            5. Check convergence: ||α δq|| < tol
+
+    This is the standard baseline for nonlinear IK treated as a generic
+    optimization problem — no exploitation of the kinematic structure
+    beyond what the QP linearization provides.
+    """
+    dq_zero = np.zeros(DOF, dtype=np.float32)
+    q = q_init.copy()
+    robot.update(q, dq_zero)
+
+    # Clear warm-start state
+    robot._osqp_solver = None
+    robot._osqp_prev_dq = np.zeros(DOF, dtype=np.float64)
+
+    # Track best result across iterations
+    best_overall_cost = float('inf')
+    best_overall_q = q.copy()
+
+    t0 = time.perf_counter()
+
+    for k in range(max_outer_iters):
+        # 1. Linearize: compute FK and Jacobians at current q
+        (x_hl, x_hr, x_el, x_er,
+         J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
+
+        # 2. Solve QP for δq (reuse the existing single-QP solver)
+        q_des_full, dq_sol = robot.update_task_space_command_qp(
+            x_elbow_l_des, x_elbow_r_des, x_el, x_er,
+            x_hand_l_des, x_hand_r_des, x_hl, x_hr,
+            J_el, J_er, J_hl, J_hr, com_des)
+        # dq_sol = q_des_full - q  (the QP step)
+        dq_step = (q_des_full - q).astype(np.float64)
+
+        if np.linalg.norm(dq_step) < convergence_tol:
+            break  # converged
+
+        # 3. Backtracking line search over α ∈ (0, 1]
+        cost_current = _sqp_tracking_cost(
+            robot, q, x_hand_l_des, x_hand_r_des, x_elbow_l_des, x_elbow_r_des)
+
+        # Update best overall if current is better
+        if cost_current < best_overall_cost:
+            best_overall_cost = cost_current
+            best_overall_q = q.copy()
+
+        alpha = 1.0
+        best_alpha = alpha
+        best_cost = float('inf')
+
+        for _ in range(ls_max_trials):
+            q_trial = q + (alpha * dq_step).astype(np.float32)
+            # Clip to joint limits
+            for i in range(6, DOF):
+                q_trial[i] = np.clip(q_trial[i], q_min[i], q_max[i])
+            cost_trial = _sqp_tracking_cost(
+                robot, q_trial, x_hand_l_des, x_hand_r_des,
+                x_elbow_l_des, x_elbow_r_des)
+            if cost_trial < best_cost:
+                best_cost = cost_trial
+                best_alpha = alpha
+            if cost_trial < cost_current:
+                break  # sufficient decrease
+            alpha *= ls_beta
+            if alpha < ls_alpha_min:
+                alpha = ls_alpha_min
+                break
+
+        # 4. Update q with best step
+        alpha = best_alpha
+        q = q + (alpha * dq_step).astype(np.float32)
+        for i in range(6, DOF):
+            q[i] = np.clip(q[i], q_min[i], q_max[i])
+        robot.update(q, dq_zero)
+
+        # 5. Check convergence
+        if np.linalg.norm(alpha * dq_step) < convergence_tol:
+            break
+
+    # Check final iteration
+    cost_final = _sqp_tracking_cost(
+        robot, q, x_hand_l_des, x_hand_r_des, x_elbow_l_des, x_elbow_r_des)
+    if cost_final < best_overall_cost:
+        best_overall_q = q.copy()
+
+    t1 = time.perf_counter()
+
+    # Use the best result across all iterations
+    hl_e, hr_e, el_e, er_e = compute_tracking_errors(
+        robot, best_overall_q, x_hand_l_des, x_hand_r_des, x_elbow_l_des, x_elbow_r_des)
+    n_cbf, max_cbf = check_cbf_violations(best_overall_q, robot)
+    n_jl = check_joint_limit_violations(best_overall_q)
+
+    return TrialResult(
+        hand_l_error=hl_e, hand_r_error=hr_e,
+        elbow_l_error=el_e, elbow_r_error=er_e,
+        solve_time_ms=(t1 - t0) * 1000,
+        cbf_violation_count=n_cbf, cbf_violation_max=max_cbf,
+        joint_limit_violations=n_jl)
+
+
 def run_single_qp(robot: Robot, q_init: np.ndarray,
                   x_hand_l_des, x_hand_r_des,
                   x_elbow_l_des, x_elbow_r_des,
@@ -355,7 +494,7 @@ def run_distributed_qp(robot: Robot, q_init: np.ndarray,
     for _ in range(n_ik_iters):
         (x_hl, x_hr, x_el, x_er,
          J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
-        q_des, dq_des = robot.update_task_space_command_qp_distributed_proxqp(
+        q_des, dq_des = robot.update_task_space_command_qp_distributed(
             x_elbow_l_des, x_elbow_r_des, x_el, x_er,
             x_hand_l_des, x_hand_r_des, x_hl, x_hr,
             J_el, J_er, J_hl, J_hr, com_des)
@@ -712,6 +851,7 @@ def run_benchmark(n_configs: int = 50, n_targets: int = 100,
     rng = np.random.default_rng(seed)
 
     methods = {
+        '0_global_ik_sqp': MethodStats(name='Global IK (SQP, line search)'),
         '1_single_qp': MethodStats(name='Single QP (ProxQP 34-DOF)'),
         '2_distributed_qp': MethodStats(name='Distributed QP (ProxQP 2×13-DOF)'),
         '3_batched_qp': MethodStats(name=f'Batched QP (GPU {n_batch}×34-DOF)'),
@@ -719,6 +859,8 @@ def run_benchmark(n_configs: int = 50, n_targets: int = 100,
     }
 
     solvers = {
+        '0_global_ik_sqp': lambda r, q, hl, hr, el, er, c: run_global_ik_sqp(
+            r, q, hl, hr, el, er, c),
         '1_single_qp': lambda r, q, hl, hr, el, er, c: run_single_qp(
             r, q, hl, hr, el, er, c, n_ik_iters),
         '2_distributed_qp': lambda r, q, hl, hr, el, er, c: run_distributed_qp(
@@ -958,6 +1100,8 @@ if __name__ == '__main__':
     parser.add_argument('--basin-perturb-sigma', type=float, default=0.1,
                         help='Q-perturbation sigma for basin-escape test (default: 0.1). '
                              'MUST be > 0 for batch diversity to work.')
+    parser.add_argument('--sqp-max-iters', type=int, default=50,
+                        help='Max outer iterations for Global IK SQP baseline (default: 50)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
     parser.add_argument('--quick', action='store_true',
@@ -967,14 +1111,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # overwriting args
-    args.n_configs = 50
+    args.n_configs = 10
     args.n_targets = 10
-    args.n_basin_configs = 100
-    args.n_basin_runs = 20
+    args.n_basin_configs = 1
+    args.n_basin_runs = 5
     args.n_ik_iters = 1
-    args.q_perturb_sigma = 0.05
-    args.basin_perturb_sigma = 0.01
-    args.n_batch = 4
+    args.q_perturb_sigma = 0.1
+    args.basin_perturb_sigma = 0.1
+    args.n_batch = 4096
 
     if args.quick:
         args.n_configs = 5
