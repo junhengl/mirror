@@ -888,7 +888,7 @@ class Robot:
         Wc_primary = np.eye(6, dtype=np.float64) * 5000
         Wc_secondary = np.eye(6, dtype=np.float64) * 5000
         Wq_diag = np.ones(DOF, dtype=np.float64) * 10
-        Wq_diag[:6] = 0
+        # Wq_diag[:6] = 0
         
         # Current state
         q_fb = self.q.astype(np.float64)
@@ -1247,7 +1247,6 @@ class Robot:
                                                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
                                                com_des,
                                                n_batch=128, max_iter=20,
-                                               q_perturb_sigma=0.0,
                                                pos_threshold=0.005):
         """GPU-batched IK-QP: solve N parallel QPs with randomized warm starts.
         
@@ -1276,8 +1275,6 @@ class Robot:
             com_des: (6,) desired COM/base pose
             n_batch: number of parallel QP instances (default 128)
             max_iter: ADMM iterations per solve (default 20)
-            q_perturb_sigma: float >= 0, randomize feedback q per batch
-                instance to explore different linearization points (default 0)
             pos_threshold: float, max position change (m) in desired EE targets
                 below which the ratchet engages (default 0.005 = 5 mm).
                 Set to 0 to always accept.
@@ -1447,12 +1444,6 @@ class Robot:
         u_qp = np.concatenate([ub_box, np.full(n_cbf, np.inf)])      # (DOF+12,)
         
         # =====================================================================
-        # Task-only Hessian for q-perturbation linearization
-        # H_task = H_qp - Wq - regularization ≈ sum(J^T W J)
-        # =====================================================================
-        H_task = H_qp - Wq - np.eye(DOF) * 1e-6
-        
-        # =====================================================================
         # Solve with GPU-batched ADMM
         # =====================================================================
         # Warm start from previous best (internal to solver)
@@ -1463,10 +1454,7 @@ class Robot:
         
         dq_sol = self._gpu_qp_solver.solve(
             H=H_qp, g=g_qp, C=C_qp, l=l_qp, u=u_qp,
-            x_warm=x_warm,
-            q_perturb_sigma=q_perturb_sigma,
-            n_box=DOF,
-            H_task=H_task
+            x_warm=x_warm
         )
         
         # =================================================================
@@ -1520,15 +1508,15 @@ class Robot:
                                                             J_hand_l, J_hand_r,
                                                             com_des,
                                                             n_batch=128, max_iter=20,
-                                                            q_perturb_sigma=0.0,
                                                             pos_threshold=0.005,
                                                             q_ref=None,
                                                             w_ref=0.0):
         """Distributed GPU-batched IK-QP: two independent 13-DOF QPs per arm.
         
         Decouples left/right arm tracking by solving separate (base 6 + arm 7
-        = 13 DOF) QPs for each arm. Each QP is solved N times in parallel on
-        GPU with randomized warm starts (and optionally randomized q feedback).
+        = 13 DOF) QPs for each arm. Uses weight perturbation: N_LIN diverse
+        tracking weight configurations are solved in a single GPU batch call
+        to explore different cost trade-offs and escape local minima.
         
         Includes a ratchet mechanism: when the desired end-effector targets
         haven't moved beyond pos_threshold, only accept the new solution if
@@ -1540,7 +1528,7 @@ class Robot:
         This combines the benefits of:
           - Distributed solving (no cross-arm interference)
           - GPU-batched ADMM (parallel local-minima exploration)
-          - Q-perturbation (different linearization points)
+          - Weight perturbation (diverse cost landscapes)
           - Ratchet (monotonic tracking improvement when target is static)
           - Reference pose tracking (regularization toward favorable config)
         
@@ -1551,16 +1539,11 @@ class Robot:
             com_des: (6,) desired COM/base pose
             n_batch: number of parallel QP instances per arm (default 128)
             max_iter: ADMM iterations per solve (default 20)
-            q_perturb_sigma: float >= 0, randomize feedback q per batch
-                instance to explore different linearization points (default 0)
             pos_threshold: float, max position change (m) in desired EE targets
                 below which the ratchet engages (default 0.005 = 5 mm).
                 Set to 0 to always accept.
             q_ref: (DOF,) optional reference pose for tracking (None = no tracking)
             w_ref: float >= 0, weight on reference pose tracking (default 0 = disabled)
-            pos_threshold: float, max position change (m) in desired EE targets
-                below which the ratchet engages (default 0.005 = 5 mm).
-                Set to 0 to always accept.
         Returns:
             q_des: (DOF,) desired joint configuration
             dq_des: (DOF,) joint velocity
@@ -1648,17 +1631,29 @@ class Robot:
         lambda_cbf = 0.5
         
         def _build_arm_qp(dof_indices, J_elbow, J_hand, e_elbow, e_hand,
-                          x_elbow, x_hand, Wc_arm, q_ref_arm=None, w_ref_arm=0.0):
+                          x_elbow, x_hand, Wc_arm, q_ref_arm=None, w_ref_arm=0.0,
+                          We_override=None, Wh_override=None, Wq_val_override=None,
+                          mu=None):
             """Build the QP matrices for one arm (13 DOF).
             
             Args:
                 q_ref_arm: (13,) reference pose for this arm (base 6 + arm 7), or None
                 w_ref_arm: weight on reference pose tracking cost
+                We_override: (6,6) optional elbow weight matrix override
+                Wh_override: (6,6) optional hand weight matrix override
+                Wq_val_override: float, optional joint reg weight override
+                mu: (n_sub,) optional joint velocity attractor shift.
+                    Changes cost from ||dq||^2_Wq to ||dq - mu||^2_Wq.
+                    Adds -Wq*mu to g (H unchanged).
             """
+            We_use = We_override if We_override is not None else We
+            Wh_use = Wh_override if Wh_override is not None else Wh
+            Wq_use = Wq_val_override if Wq_val_override is not None else Wq_val
+            
             J_elbow_sub = J_elbow[:, dof_indices]
             J_hand_sub = J_hand[:, dof_indices]
             J_com_sub = J_com_full[:, dof_indices]
-            Wq_sub = np.eye(n_sub, dtype=np.float64) * Wq_val
+            Wq_sub = np.eye(n_sub, dtype=np.float64) * Wq_use
             
             # Add reference pose regularization to Wq if enabled
             Wq_with_ref = Wq_sub.copy()
@@ -1666,8 +1661,8 @@ class Robot:
                 Wq_with_ref += np.eye(n_sub, dtype=np.float64) * w_ref_arm
             
             # Hessian
-            H = (J_elbow_sub.T @ We @ J_elbow_sub +
-                 J_hand_sub.T @ Wh @ J_hand_sub +
+            H = (J_elbow_sub.T @ We_use @ J_elbow_sub +
+                 J_hand_sub.T @ Wh_use @ J_hand_sub +
                  J_com_sub.T @ Wc_arm @ J_com_sub +
                  Wq_with_ref)
             H = 0.5 * (H + H.T)
@@ -1678,13 +1673,16 @@ class Robot:
                 print(f"WARNING: Hessian contains NaN/Inf! Adding stronger regularization.")
                 H = np.eye(n_sub, dtype=np.float64) * 1e-3  # Fallback to identity
             
-            # Task-only Hessian (for q-perturbation g correction)
-            H_task = H - Wq_with_ref - np.eye(n_sub) * 1e-6
-            
             # Linear term: standard tracking errors
-            g = -(J_elbow_sub.T @ We @ e_elbow +
-                  J_hand_sub.T @ Wh @ e_hand +
+            g = -(J_elbow_sub.T @ We_use @ e_elbow +
+                  J_hand_sub.T @ Wh_use @ e_hand +
                   J_com_sub.T @ Wc_arm @ e_com)
+            
+            # Joint velocity attractor shift: ||dq - mu||^2_Wq
+            # Expands to dq^T Wq dq - 2 mu^T Wq dq + const
+            # so g gets -Wq @ mu (since cost = 0.5 x^T H x + g^T x)
+            if mu is not None:
+                g += -Wq_sub @ mu
             
             # Add reference pose tracking term to linear cost
             if w_ref_arm > 0 and q_ref_arm is not None:
@@ -1743,7 +1741,7 @@ class Robot:
             l_qp = np.concatenate([lb_box, b_cbf])
             u_qp = np.concatenate([ub_box, np.full(n_cbf, np.inf)])
             
-            return H, g, C_qp, l_qp, u_qp, H_task
+            return H, g, C_qp, l_qp, u_qp
         
         # =====================================================================
         # Build and solve QPs (fused block-diagonal for 2× speedup)
@@ -1758,118 +1756,87 @@ class Robot:
                 q_ref_l = q_ref[left_dofs]
         
         fused_solver = self._gpu_qp_solver_right  # reuse field for fused solver
-        q_perturb_sigma = 0.1
-        if q_perturb_sigma > 0:
-            # ─── Task-space perturbation ──────────────────────────────────
-            # Instead of perturbing q (which requires FK recomputation),
-            # perturb the task-space feedback (x_elbow, x_hand) directly.
-            # This creates diverse QP problems (different g, CBF constraints)
-            # while sharing the same Hessian H (Jacobians unchanged).
-            # A small set of linearizations is solved with the full GPU
-            # batch, and the best is selected on the nominal QP.
-            N_LIN = 8  # Number of diverse task-space linearizations
+        
+        # ─── Weight-perturbed multi-lin solve ────────────────────────────
+        # Each of K partitions solves a QP with differently scaled
+        # tracking weights (We, Wh, Wq). This changes both H and g,
+        # reshaping the cost landscape so each partition converges to a
+        # different solution. We then pick the one with the lowest
+        # *nominal* tracking cost.
+        #
+        # Weight scales are drawn from LogNormal(0, σ) so they're always
+        # positive and centered around the nominal value (scale=1).
+        # Independent scales for elbow, hand, and joint regularization
+        # give each partition a unique cost-surface shape.
+        N_WEIGHT_PERTURB = 4     # K: number of weight partitions
+        WEIGHT_SIGMA = 0.7       # log-std for weight scaling (~[0.2, 5.0] range)
+        MU_SIGMA = 0.05          # rad: std of joint velocity attractor shift
+        
+        # Partition 0 = nominal weights, mu=0 (always included)
+        H_r_list, g_r_list = [], []
+        H_l_list, g_l_list = [], []
+        
+        # Build nominal QP (partition 0) — also provides shared C, l, u
+        H_r_0, g_r_0, C_r, l_r, u_r = _build_arm_qp(
+            right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
+            x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
+        H_l_0, g_l_0, C_l, l_l, u_l = _build_arm_qp(
+            left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
+            x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
+        H_r_list.append(H_r_0);  g_r_list.append(g_r_0)
+        H_l_list.append(H_l_0);  g_l_list.append(g_l_0)
+        
+        n_box = n_sub  # box-constraint rows = joint limits (13 per arm)
+        
+        # Generate K-1 perturbed QPs (weight scaling + mu shift)
+        for _ in range(N_WEIGHT_PERTURB - 1):
+            # Independent log-normal scales for each weight component
+            s_e = np.exp(np.random.randn() * WEIGHT_SIGMA)   # elbow scale
+            s_h = np.exp(np.random.randn() * WEIGHT_SIGMA)   # hand scale
+            s_q = np.exp(np.random.randn() * WEIGHT_SIGMA)   # joint reg scale
             
-            g_r_list, C_r_list, l_r_list, u_r_list = [], [], [], []
-            g_l_list, C_l_list, l_l_list, u_l_list = [], [], [], []
-            H_r_nom, H_l_nom = None, None
-            Ht_r_nom, Ht_l_nom = None, None
+            We_k = We * s_e
+            Wh_k = Wh * s_h
+            Wq_k = Wq_val * s_q
             
-            for i in range(N_LIN):
-                if i == 0:
-                    # Instance 0: nominal (no perturbation)
-                    x_el_p, x_er_p = x_elbow_l, x_elbow_r
-                    x_hl_p, x_hr_p = x_hand_l, x_hand_r
-                else:
-                    # Perturb position components [3:6] of task-space feedback
-                    # Orientation [0:3] left unperturbed (small rotations are
-                    # hard to meaningfully randomize and the cost weights them
-                    # much less than position)
-                    sigma_pos = q_perturb_sigma  # metres
-                    
-                    x_el_p = x_elbow_l.copy().astype(np.float64)
-                    x_er_p = x_elbow_r.copy().astype(np.float64)
-                    x_hl_p = x_hand_l.copy().astype(np.float64)
-                    x_hr_p = x_hand_r.copy().astype(np.float64)
-                    
-                    x_el_p[3:] += np.random.randn(3) * sigma_pos
-                    x_er_p[3:] += np.random.randn(3) * sigma_pos
-                    x_hl_p[3:] += np.random.randn(3) * sigma_pos
-                    x_hr_p[3:] += np.random.randn(3) * sigma_pos
-                
-                # Errors at (possibly perturbed) task-space state
-                e_el_i = (x_elbow_l_des - x_el_p).astype(np.float64)
-                e_er_i = (x_elbow_r_des - x_er_p).astype(np.float64)
-                e_hl_i = (x_hand_l_des - x_hl_p).astype(np.float64)
-                e_hr_i = (x_hand_r_des - x_hr_p).astype(np.float64)
-                
-                H_r_i, g_r_i, C_r_i, l_r_i, u_r_i, Ht_r_i = _build_arm_qp(
-                    right_dofs, J_elbow_r, J_hand_r, e_er_i, e_hr_i,
-                    x_er_p, x_hr_p, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
-                H_l_i, g_l_i, C_l_i, l_l_i, u_l_i, Ht_l_i = _build_arm_qp(
-                    left_dofs, J_elbow_l, J_hand_l, e_el_i, e_hl_i,
-                    x_el_p, x_hl_p, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
-                
-                if i == 0:
-                    H_r_nom, H_l_nom = H_r_i, H_l_i
-                    Ht_r_nom, Ht_l_nom = Ht_r_i, Ht_l_i
-                
-                g_r_list.append(g_r_i)
-                C_r_list.append(C_r_i)
-                l_r_list.append(l_r_i)
-                u_r_list.append(u_r_i)
-                g_l_list.append(g_l_i)
-                C_l_list.append(C_l_i)
-                l_l_list.append(l_l_i)
-                u_l_list.append(u_l_i)
+            # Random joint velocity attractor shift (independent per arm)
+            mu_r = np.random.randn(n_sub) * MU_SIGMA
+            mu_l = np.random.randn(n_sub) * MU_SIGMA
             
-            # All linearizations share the same H and C — only g and
-            # CBF bounds differ.  Use C from the nominal (index-0) QP.
-            dq_right, dq_left = BatchedGPUQPSolver.solve_pair_multi_lin(
-                fused_solver,
-                H_r_nom, H_l_nom,
-                g_r_list, l_r_list, u_r_list,
-                g_l_list, l_l_list, u_l_list,
-                C_r=C_r_list[0], C_l=C_l_list[0],
-                n_box_a=n_sub, n_box_b=n_sub
-            )
-        else:
-            # ─── No perturbation: single QP at nominal configuration ─────
-            H_r, g_r, C_r, l_r, u_r, Ht_r = _build_arm_qp(
+            H_r_k, g_r_k, _, _, _ = _build_arm_qp(
                 right_dofs, J_elbow_r, J_hand_r, e_elbow_r, e_hand_r,
-                x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
-            
-            H_l, g_l, C_l, l_l, u_l, Ht_l = _build_arm_qp(
+                x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref,
+                We_override=We_k, Wh_override=Wh_k, Wq_val_override=Wq_k,
+                mu=mu_r)
+            H_l_k, g_l_k, _, _, _ = _build_arm_qp(
                 left_dofs, J_elbow_l, J_hand_l, e_elbow_l, e_hand_l,
-                x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
-            
-            # Warm start from previous fused solution
-            x_warm_r = None
-            x_warm_l = None
-            if (fused_solver._prev_best is not None
-                    and fused_solver._prev_n == 2 * n_sub):
-                prev = fused_solver._prev_best.cpu().numpy()
-                x_warm_r = prev[:n_sub]
-                x_warm_l = prev[n_sub:]
-            
-            dq_right, dq_left = BatchedGPUQPSolver.solve_pair(
-                fused_solver,
-                H_r, g_r, C_r, l_r, u_r,
-                H_l, g_l, C_l, l_l, u_l,
-                x_warm_a=x_warm_r, x_warm_b=x_warm_l,
-                q_perturb_sigma=0.0,
-                n_box_a=n_sub, n_box_b=n_sub,
-                H_task_a=Ht_r, H_task_b=Ht_l
-            )
+                x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref,
+                We_override=We_k, Wh_override=Wh_k, Wq_val_override=Wq_k,
+                mu=mu_l)
+            H_r_list.append(H_r_k);  g_r_list.append(g_r_k)
+            H_l_list.append(H_l_k);  g_l_list.append(g_l_k)
+        
+        # Shared bounds (constraints don't depend on weights)
+        l_r_list = [l_r] * N_WEIGHT_PERTURB
+        u_r_list = [u_r] * N_WEIGHT_PERTURB
+        l_l_list = [l_l] * N_WEIGHT_PERTURB
+        u_l_list = [u_l] * N_WEIGHT_PERTURB
+        
+        dq_right, dq_left = BatchedGPUQPSolver.solve_pair_multi_lin(
+            fused_solver,
+            H_r_list, H_l_list,
+            g_r_list, g_l_list,
+            C_r, C_l,
+            l_r_list, u_r_list,
+            l_l_list, u_l_list,
+            n_box_a=n_box, n_box_b=n_box,
+        )
         
         # Check for NaN/Inf in solver output
         if (not np.all(np.isfinite(dq_right)) or not np.all(np.isfinite(dq_left))):
             print(f"WARNING: GPU QP solver returned NaN/Inf!")
             print(f"  dq_right finite: {np.isfinite(dq_right)}")
             print(f"  dq_left finite: {np.isfinite(dq_left)}")
-            print(f"  H_r finite: {np.all(np.isfinite(H_r))}, cond: {np.linalg.cond(H_r):.2e}")
-            print(f"  H_l finite: {np.all(np.isfinite(H_l))}, cond: {np.linalg.cond(H_l):.2e}")
-            print(f"  g_r finite: {np.all(np.isfinite(g_r))}, max: {np.max(np.abs(g_r)):.2e}")
-            print(f"  g_l finite: {np.all(np.isfinite(g_l))}, max: {np.max(np.abs(g_l)):.2e}")
             print("  Returning zero velocity.")
             return self.q, np.zeros(DOF, dtype=np.float32)
         
@@ -1926,4 +1893,389 @@ class Robot:
         self._ik_ratchet_q_des = q_des
         self._ik_ratchet_dq_des = dq_des
         
+        return q_des, dq_des
+
+    def update_task_space_command_qp_gpu_batch_distributed_alpha(
+            self,
+            x_elbow_l_des, x_elbow_r_des,
+            x_elbow_l, x_elbow_r,
+            x_hand_l_des, x_hand_r_des,
+            x_hand_l, x_hand_r,
+            J_elbow_l, J_elbow_r,
+            J_hand_l, J_hand_r,
+            com_des,
+            n_batch=4096, max_iter=50,
+            pos_threshold=0.005,
+            q_ref=None,
+            w_ref=0.0,
+            n_alpha=8,
+            delta_progress=0.001,
+            dq_max=0.5):
+        """Max-feasible-α distributed GPU-batched IK-QP.
+
+        Instead of perturbing weights or μ, this method explores intermediate
+        targets along the line from current EE position to desired target:
+
+            x_d^{(k)} = (1 - α_k) * x(q) + α_k * x_d,   0 < α_1 < ... < α_K = 1
+
+        For each α_k, we solve an independent QP (same linearization point,
+        different tracking error / RHS). Then select the **largest** α_k
+        whose candidate Δq^{(k)} satisfies:
+
+        1. **Feasibility**:
+           - CBF constraints satisfied (or slack below threshold)
+           - Joint limits satisfied
+           - Step limit: ||Δq^{(k)}|| ≤ dq_max
+
+        2. **Progress toward final target** (using predicted linear model):
+           ê_final^{(k)} = (x_d - x(q)) - J * Δq^{(k)}
+           Require: ||ê_final^{(k)}|| ≤ ||e_final^{(0)}|| - δ
+           where e_final^{(0)} = x_d - x(q) is the initial error.
+
+        This ensures we always make progress toward the true goal while
+        respecting constraints, choosing the most aggressive feasible step.
+
+        Args:
+            x_{elbow,hand}_{l,r}_des: (6,) desired task-space poses [rpy, xyz]
+            x_{elbow,hand}_{l,r}: (6,) current task-space poses
+            J_{elbow,hand}_{l,r}: (6, DOF) task Jacobians
+            com_des: (6,) desired COM/base pose
+            n_batch: number of parallel QP instances (default 4096)
+            max_iter: ADMM iterations per solve (default 50)
+            pos_threshold: ratchet threshold (default 0.005 m)
+            q_ref: (DOF,) optional reference pose
+            w_ref: weight on reference pose tracking
+            n_alpha: number of α levels to try (default 8)
+            delta_progress: minimum progress margin δ (default 0.001 m)
+            dq_max: max step norm (rad) for feasibility (default 0.5)
+
+        Returns:
+            q_des: (DOF,) desired joint configuration
+            dq_des: (DOF,) joint velocity
+        """
+        try:
+            from gpu_qp_solver import BatchedGPUQPSolver, TORCH_AVAILABLE
+            if not TORCH_AVAILABLE:
+                raise ImportError("PyTorch not available")
+        except ImportError:
+            print("Warning: gpu_qp_solver/PyTorch not available. "
+                  "Falling back to distributed ProxQP.")
+            return self.update_task_space_command_qp_distributed_proxqp(
+                x_elbow_l_des, x_elbow_r_des, x_elbow_l, x_elbow_r,
+                x_hand_l_des, x_hand_r_des, x_hand_l, x_hand_r,
+                J_elbow_l, J_elbow_r, J_hand_l, J_hand_r, com_des)
+
+        # =====================================================================
+        # Lazily create GPU solver
+        # =====================================================================
+        if (self._gpu_qp_solver_right is None
+                or self._gpu_qp_solver_right.n_batch != n_batch
+                or self._gpu_qp_solver_right.max_iter != max_iter):
+            self._gpu_qp_solver_right = BatchedGPUQPSolver(
+                n_batch=n_batch,
+                max_iter=max_iter,
+                rho=50.0,
+                alpha=1.6,
+                sigma=1e-6,
+                device=None,
+                dtype='float32'
+            )
+
+        # =====================================================================
+        # DOF partitioning
+        # =====================================================================
+        BASE_DOFS = np.arange(0, 6)
+        RIGHT_ARM_DOFS = np.arange(18, 25)
+        LEFT_ARM_DOFS = np.arange(25, 32)
+        right_dofs = np.concatenate([BASE_DOFS, RIGHT_ARM_DOFS])  # 13
+        left_dofs = np.concatenate([BASE_DOFS, LEFT_ARM_DOFS])    # 13
+        n_sub = 13
+
+        # =====================================================================
+        # Weights
+        # =====================================================================
+        We = 0.1 * np.diag([0.0, 0.0, 0.0, 150.0, 150.0, 150.0]).astype(np.float64)
+        Wh = 1.0 * np.diag([1.0, 1.0, 1.0, 100.0, 100.0, 100.0]).astype(np.float64)
+        Wc = np.eye(6, dtype=np.float64) * 5000
+        Wq_val = 10.0
+
+        # =====================================================================
+        # Current state
+        # =====================================================================
+        q_fb = self.q.astype(np.float64)
+        J_com_full = np.zeros((6, DOF), dtype=np.float64)
+        J_com_full[:, :6] = np.eye(6, dtype=np.float64)
+        e_com = (com_des - self.q[:6]).astype(np.float64)
+
+        J_elbow_l = J_elbow_l.astype(np.float64)
+        J_elbow_r = J_elbow_r.astype(np.float64)
+        J_hand_l = J_hand_l.astype(np.float64)
+        J_hand_r = J_hand_r.astype(np.float64)
+
+        qj_min = q_min.astype(np.float64)
+        qj_max = q_max.astype(np.float64)
+
+        # CBF setup
+        com_offset = np.array([-0.1, 0.0, 0.0], dtype=np.float64)
+        head_offset = np.array([-0.1, 0.0, 0.3], dtype=np.float64)
+        crotch_offset = np.array([-0.1, 0.0, -0.3], dtype=np.float64)
+        head_pos = q_fb[:3] + head_offset
+        crotch_pos = q_fb[:3] + crotch_offset
+
+        r_torso, r_head, r_crotch = 0.15, 0.13, 0.19
+        rho_torso = r_torso + 0.02
+        rho_head = r_head + 0.02
+        rho_crotch = r_crotch + 0.02
+        lambda_cbf = 0.5
+
+        # Reference pose
+        q_ref_r = None
+        q_ref_l = None
+        if q_ref is not None:
+            q_ref = np.asarray(q_ref, dtype=np.float64)
+            if q_ref.shape[0] == DOF:
+                q_ref_r = q_ref[right_dofs]
+                q_ref_l = q_ref[left_dofs]
+
+        # =====================================================================
+        # Build QP helper (closure over shared state)
+        # =====================================================================
+        def _build_arm_qp_alpha(dof_indices, J_elbow, J_hand, e_elbow, e_hand,
+                                x_elbow, x_hand, Wc_arm, q_ref_arm=None, w_ref_arm=0.0):
+            """Build QP matrices for one arm with given tracking errors."""
+            J_elbow_sub = J_elbow[:, dof_indices]
+            J_hand_sub = J_hand[:, dof_indices]
+            J_com_sub = J_com_full[:, dof_indices]
+            Wq_sub = np.eye(n_sub, dtype=np.float64) * Wq_val
+
+            Wq_with_ref = Wq_sub.copy()
+            if w_ref_arm > 0 and q_ref_arm is not None:
+                Wq_with_ref += np.eye(n_sub, dtype=np.float64) * w_ref_arm
+
+            # Hessian (shared across all α)
+            H = (J_elbow_sub.T @ We @ J_elbow_sub +
+                 J_hand_sub.T @ Wh @ J_hand_sub +
+                 J_com_sub.T @ Wc_arm @ J_com_sub +
+                 Wq_with_ref)
+            H = 0.5 * (H + H.T)
+            H += np.eye(n_sub) * 1e-6
+
+            # Linear term
+            g = -(J_elbow_sub.T @ We @ e_elbow +
+                  J_hand_sub.T @ Wh @ e_hand +
+                  J_com_sub.T @ Wc_arm @ e_com)
+
+            if w_ref_arm > 0 and q_ref_arm is not None:
+                q_fb_arm = q_fb[dof_indices]
+                q_ref_feedback = q_ref_arm.astype(np.float64)
+                g += -w_ref_arm * q_ref_feedback + w_ref_arm * q_fb_arm
+
+            # CBF constraints
+            x_elbow_pos = x_elbow[3:].astype(np.float64)
+            x_hand_pos = x_hand[3:].astype(np.float64)
+
+            d_elbow_com = x_elbow_pos - q_fb[:3] - com_offset
+            d_hand_com = x_hand_pos - q_fb[:3] - com_offset
+            d_elbow_head = x_elbow_pos - head_pos
+            d_hand_head = x_hand_pos - head_pos
+            d_elbow_crotch = x_elbow_pos - crotch_pos
+            d_hand_crotch = x_hand_pos - crotch_pos
+
+            h_vals = np.array([
+                np.dot(d_elbow_com, d_elbow_com) - rho_torso**2,
+                np.dot(d_hand_com, d_hand_com) - rho_torso**2,
+                np.dot(d_elbow_head, d_elbow_head) - rho_head**2,
+                np.dot(d_hand_head, d_hand_head) - rho_head**2,
+                np.dot(d_elbow_crotch, d_elbow_crotch) - rho_crotch**2,
+                np.dot(d_hand_crotch, d_hand_crotch) - rho_crotch**2,
+            ], dtype=np.float64)
+
+            J_elbow_lin = J_elbow[3:, dof_indices]
+            J_hand_lin = J_hand[3:, dof_indices]
+            J_com_lin = J_com_full[:3, dof_indices]
+
+            d_list = [d_elbow_com, d_hand_com, d_elbow_head,
+                      d_hand_head, d_elbow_crotch, d_hand_crotch]
+            J_refs = [J_elbow_lin, J_hand_lin, J_elbow_lin,
+                      J_hand_lin, J_elbow_lin, J_hand_lin]
+
+            aT_rows = [2.0 * d @ (J_ref - J_com_lin)
+                       for d, J_ref in zip(d_list, J_refs)]
+            aT_cbf = np.vstack(aT_rows)
+            b_cbf = -lambda_cbf * h_vals
+
+            lb_box = qj_min[dof_indices] - q_fb[dof_indices]
+            ub_box = qj_max[dof_indices] - q_fb[dof_indices]
+
+            n_cbf = 6
+            C_qp = np.vstack([np.eye(n_sub, dtype=np.float64), aT_cbf])
+            l_qp = np.concatenate([lb_box, b_cbf])
+            u_qp = np.concatenate([ub_box, np.full(n_cbf, np.inf)])
+
+            return H, g, C_qp, l_qp, u_qp
+
+        # =====================================================================
+        # Generate α schedule: [α_1, ..., α_K] with α_K = 1
+        # =====================================================================
+        alphas = np.linspace(1.0 / n_alpha, 1.0, n_alpha)  # e.g., [0.125, 0.25, ..., 1.0]
+
+        # Final target errors (for progress check)
+        e_elbow_l_final = (x_elbow_l_des - x_elbow_l).astype(np.float64)
+        e_elbow_r_final = (x_elbow_r_des - x_elbow_r).astype(np.float64)
+        e_hand_l_final = (x_hand_l_des - x_hand_l).astype(np.float64)
+        e_hand_r_final = (x_hand_r_des - x_hand_r).astype(np.float64)
+
+        # Initial error norm (for progress requirement)
+        e0_norm = np.sqrt(
+            np.sum(e_elbow_l_final[3:]**2) + np.sum(e_elbow_r_final[3:]**2) +
+            np.sum(e_hand_l_final[3:]**2) + np.sum(e_hand_r_final[3:]**2))
+
+        # =====================================================================
+        # Build QP once (α=1) to get shared H, C, l, u
+        # =====================================================================
+        H_r, g_r_full, C_r, l_r, u_r = _build_arm_qp_alpha(
+            right_dofs, J_elbow_r, J_hand_r, e_elbow_r_final, e_hand_r_final,
+            x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
+        H_l, g_l_full, C_l, l_l, u_l = _build_arm_qp_alpha(
+            left_dofs, J_elbow_l, J_hand_l, e_elbow_l_final, e_hand_l_final,
+            x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
+
+        # Store Jacobian subsets for progress check
+        J_elbow_r_sub = J_elbow_r[:, right_dofs]
+        J_hand_r_sub = J_hand_r[:, right_dofs]
+        J_elbow_l_sub = J_elbow_l[:, left_dofs]
+        J_hand_l_sub = J_hand_l[:, left_dofs]
+
+        # =====================================================================
+        # Compute g for each α analytically (g is linear in α)
+        # g(α) = α * g_tracking + g_const
+        # where g_tracking = -(J_e^T We e_final + J_h^T Wh e_final)
+        # and g_const includes COM + reference terms (independent of α)
+        # =====================================================================
+        # Extract constant part: build g with zero tracking errors
+        _, g_r_const, _, _, _ = _build_arm_qp_alpha(
+            right_dofs, J_elbow_r, J_hand_r,
+            np.zeros(6, dtype=np.float64), np.zeros(6, dtype=np.float64),
+            x_elbow_r, x_hand_r, Wc, q_ref_arm=q_ref_r, w_ref_arm=w_ref)
+        _, g_l_const, _, _, _ = _build_arm_qp_alpha(
+            left_dofs, J_elbow_l, J_hand_l,
+            np.zeros(6, dtype=np.float64), np.zeros(6, dtype=np.float64),
+            x_elbow_l, x_hand_l, Wc, q_ref_arm=q_ref_l, w_ref_arm=w_ref)
+
+        # g_tracking = g_full - g_const  (the part that scales with α)
+        g_r_track = g_r_full - g_r_const
+        g_l_track = g_l_full - g_l_const
+
+        # Build per-α g vectors: g(α) = α * g_track + g_const
+        g_r_list = [alpha * g_r_track + g_r_const for alpha in alphas]
+        g_l_list = [alpha * g_l_track + g_l_const for alpha in alphas]
+
+        # =====================================================================
+        # Solve ALL α-QPs in a SINGLE GPU call
+        # =====================================================================
+        fused_solver = self._gpu_qp_solver_right
+
+        all_solutions = BatchedGPUQPSolver.solve_pair_multi_g_all(
+            fused_solver,
+            H_r, H_l,
+            g_r_list, g_l_list,
+            C_r, C_l,
+            l_r, u_r, l_l, u_l)
+
+        # =====================================================================
+        # Select max-feasible-α with progress guarantee
+        # =====================================================================
+        best_k = -1  # Will pick largest feasible k
+
+        for k in range(n_alpha - 1, -1, -1):  # Iterate from largest α to smallest
+            dq_r_k, dq_l_k = all_solutions[k]
+
+            # Feasibility check 1: step limit
+            dq_r_norm = np.linalg.norm(dq_r_k)
+            dq_l_norm = np.linalg.norm(dq_l_k)
+            if dq_r_norm > dq_max or dq_l_norm > dq_max:
+                continue
+
+            # Feasibility check 2: joint limits (already enforced by QP, but check)
+            q_new_r = q_fb[right_dofs] + dq_r_k
+            q_new_l = q_fb[left_dofs] + dq_l_k
+            if np.any(q_new_r < qj_min[right_dofs] - 1e-4) or np.any(q_new_r > qj_max[right_dofs] + 1e-4):
+                continue
+            if np.any(q_new_l < qj_min[left_dofs] - 1e-4) or np.any(q_new_l > qj_max[left_dofs] + 1e-4):
+                continue
+
+            # Feasibility check 3: CBF (slack below threshold)
+            # Check C @ dq >= l (lower bounds include CBF)
+            Cx_r = C_r @ dq_r_k
+            Cx_l = C_l @ dq_l_k
+            cbf_viol_r = np.maximum(l_r - Cx_r, 0).sum()
+            cbf_viol_l = np.maximum(l_l - Cx_l, 0).sum()
+            if cbf_viol_r > 1e-3 or cbf_viol_l > 1e-3:
+                continue
+
+            # Progress check: predicted final error using linear model
+            # ê_final^{(k)} = e_final - J * Δq^{(k)}
+            e_pred_elbow_r = e_elbow_r_final[3:] - J_elbow_r_sub[3:, :] @ dq_r_k
+            e_pred_hand_r = e_hand_r_final[3:] - J_hand_r_sub[3:, :] @ dq_r_k
+            e_pred_elbow_l = e_elbow_l_final[3:] - J_elbow_l_sub[3:, :] @ dq_l_k
+            e_pred_hand_l = e_hand_l_final[3:] - J_hand_l_sub[3:, :] @ dq_l_k
+
+            e_pred_norm = np.sqrt(
+                np.sum(e_pred_elbow_r**2) + np.sum(e_pred_hand_r**2) +
+                np.sum(e_pred_elbow_l**2) + np.sum(e_pred_hand_l**2))
+
+            # Require: ||ê_final^{(k)}|| ≤ ||e0|| - δ
+            if e_pred_norm <= e0_norm - delta_progress:
+                best_k = k
+                break  # Found largest feasible α
+
+        # Fallback: if no α satisfies progress, use smallest α (most conservative)
+        if best_k < 0:
+            best_k = 0
+
+        dq_right, dq_left = all_solutions[best_k]
+
+        # =====================================================================
+        # Combine
+        # =====================================================================
+        dq_sol = np.zeros(DOF, dtype=np.float32)
+        dq_sol[:6] = dq_right[:6].astype(np.float32)
+        dq_sol[18:25] = dq_right[6:].astype(np.float32)
+        dq_sol[25:32] = dq_left[6:].astype(np.float32)
+
+        # Ratchet
+        if pos_threshold > 0:
+            current_cost = (np.sum((x_elbow_l_des[3:] - x_elbow_l[3:])**2) +
+                            np.sum((x_elbow_r_des[3:] - x_elbow_r[3:])**2) +
+                            np.sum((x_hand_l_des[3:] - x_hand_l[3:])**2) +
+                            np.sum((x_hand_r_des[3:] - x_hand_r[3:])**2))
+
+            des_pos = np.concatenate([
+                x_elbow_l_des[3:], x_elbow_r_des[3:],
+                x_hand_l_des[3:], x_hand_r_des[3:]
+            ]).astype(np.float64)
+
+            target_moved = True
+            if self._ik_ratchet_prev_des is not None:
+                max_shift = np.max(np.abs(des_pos - self._ik_ratchet_prev_des))
+                target_moved = (max_shift > pos_threshold)
+
+            if target_moved or current_cost < self._ik_ratchet_prev_cost:
+                self._ik_ratchet_prev_des = des_pos
+                self._ik_ratchet_prev_cost = current_cost
+            else:
+                if (self._ik_ratchet_q_des is not None
+                        and self._ik_ratchet_dq_des is not None):
+                    return self._ik_ratchet_q_des, self._ik_ratchet_dq_des
+
+        q_des = self.q + dq_sol
+        dq_des = dq_sol
+
+        if not np.all(np.isfinite(q_des)) or not np.all(np.isfinite(dq_des)):
+            print("WARNING: Final q_des/dq_des contains NaN/Inf! Returning current state.")
+            return self.q, np.zeros(DOF, dtype=np.float32)
+
+        self._ik_ratchet_q_des = q_des
+        self._ik_ratchet_dq_des = dq_des
+
         return q_des, dq_des

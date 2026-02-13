@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """
-IK Solver Benchmark — Standardized Comparison of 4 IK Methods
-=============================================================
+IK Solver Benchmark — Multi-step Convergence Comparison
+========================================================
 
 Compares:
   (1) Single QP IK                     (ProxQP, 34-DOF)
   (2) Distributed Single QP IK         (ProxQP, 2×13-DOF)
   (3) Batched QP IK                    (GPU ADMM, 34-DOF, N parallel)
   (4) Batched Distributed QP IK        (GPU ADMM, 2×13-DOF fused, N parallel)
+  (5) Batched α-Continuation IK        (GPU ADMM, max-feasible-α)
 
-Metrics:
-  A. Average hand tracking error norm (m)
-  B. Average elbow tracking error norm (m)
-  C. Average computation time (ms)
-  D. CBF constraint violation count & magnitude
-  E. Basin-escape metric: fraction of trials where batched methods find a
-     better solution than single-shot (proves probabilistic exploration)
+Primary metric: Multi-step IK convergence
+  Run each method for K IK iterations on far-away targets.
+  At each differential IK step, re-linearize (FK + Jacobian) at the new q,
+  solve QP for Δq, then update q ← q + Δq.  After K steps, measure final
+  tracking error.  Methods with better exploration (basin escape, α
+  continuation) should converge to lower final error because they can
+  escape poor local minima during the iterative re-linearization process.
+
+Secondary metrics:
+  - Per-step timing
+  - CBF / joint limit violations
+  - Convergence trajectory (error vs step)
 
 Test conditions:
   - N_CONFIGS random initial robot configurations
   - N_TARGETS random feasible task-space targets per configuration
-  - Multiple IK iterations per (config, target) pair
+  - Targets generated with LARGE joint perturbation (0.5 rad) to create
+    targets that require multiple IK steps
   - Warm-start disabled between trials for fair comparison
 
 Usage:
     cd /home/junhengl/body_tracking
-    python -m tests.ik_benchmark [--n-configs 50] [--n-targets 10] [--n-batch 128]
+    python -m tests.ik_benchmark [--n-configs 20] [--n-targets 5] [--n-batch 4096]
 """
 
 import sys
@@ -66,6 +73,8 @@ class TrialResult:
     joint_limit_violations: int = 0 # Number of joint limit violations
     qp_cost: float = 0.0           # Raw QP objective value
     converged: bool = True
+    error_trajectory: List[float] = field(default_factory=list)
+    # Per-step total position error (sum of 4 EE norms) at each IK step
 
 
 @dataclass
@@ -361,12 +370,21 @@ def run_global_ik_sqp(robot: Robot, q_init: np.ndarray,
     best_overall_cost = float('inf')
     best_overall_q = q.copy()
 
+    trajectory = []
+
     t0 = time.perf_counter()
 
     for k in range(max_outer_iters):
         # 1. Linearize: compute FK and Jacobians at current q
         (x_hl, x_hr, x_el, x_er,
          J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
+
+        # Record error at this linearization point
+        err = (np.linalg.norm(x_hl[3:] - x_hand_l_des[3:]) +
+               np.linalg.norm(x_hr[3:] - x_hand_r_des[3:]) +
+               np.linalg.norm(x_el[3:] - x_elbow_l_des[3:]) +
+               np.linalg.norm(x_er[3:] - x_elbow_r_des[3:]))
+        trajectory.append(float(err))
 
         # 2. Solve QP for δq (reuse the existing single-QP solver)
         q_des_full, dq_sol = robot.update_task_space_command_qp(
@@ -440,7 +458,8 @@ def run_global_ik_sqp(robot: Robot, q_init: np.ndarray,
         elbow_l_error=el_e, elbow_r_error=er_e,
         solve_time_ms=(t1 - t0) * 1000,
         cbf_violation_count=n_cbf, cbf_violation_max=max_cbf,
-        joint_limit_violations=n_jl)
+        joint_limit_violations=n_jl,
+        error_trajectory=trajectory)
 
 
 def run_single_qp(robot: Robot, q_init: np.ndarray,
@@ -456,10 +475,20 @@ def run_single_qp(robot: Robot, q_init: np.ndarray,
     robot._osqp_solver = None
     robot._osqp_prev_dq = np.zeros(DOF, dtype=np.float64)
 
+    trajectory = []
+
     t0 = time.perf_counter()
     for _ in range(n_ik_iters):
         (x_hl, x_hr, x_el, x_er,
          J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
+
+        # Record error at this linearization point
+        err = (np.linalg.norm(x_hl[3:] - x_hand_l_des[3:]) +
+               np.linalg.norm(x_hr[3:] - x_hand_r_des[3:]) +
+               np.linalg.norm(x_el[3:] - x_elbow_l_des[3:]) +
+               np.linalg.norm(x_er[3:] - x_elbow_r_des[3:]))
+        trajectory.append(float(err))
+
         q_des, dq_des = robot.update_task_space_command_qp(
             x_elbow_l_des, x_elbow_r_des, x_el, x_er,
             x_hand_l_des, x_hand_r_des, x_hl, x_hr,
@@ -478,7 +507,8 @@ def run_single_qp(robot: Robot, q_init: np.ndarray,
         elbow_l_error=el_e, elbow_r_error=er_e,
         solve_time_ms=(t1 - t0) * 1000,
         cbf_violation_count=n_cbf, cbf_violation_max=max_cbf,
-        joint_limit_violations=n_jl)
+        joint_limit_violations=n_jl,
+        error_trajectory=trajectory)
 
 
 def run_distributed_qp(robot: Robot, q_init: np.ndarray,
@@ -490,10 +520,19 @@ def run_distributed_qp(robot: Robot, q_init: np.ndarray,
     q = q_init.copy()
     robot.update(q, dq)
 
+    trajectory = []
+
     t0 = time.perf_counter()
     for _ in range(n_ik_iters):
         (x_hl, x_hr, x_el, x_er,
          J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
+
+        err = (np.linalg.norm(x_hl[3:] - x_hand_l_des[3:]) +
+               np.linalg.norm(x_hr[3:] - x_hand_r_des[3:]) +
+               np.linalg.norm(x_el[3:] - x_elbow_l_des[3:]) +
+               np.linalg.norm(x_er[3:] - x_elbow_r_des[3:]))
+        trajectory.append(float(err))
+
         q_des, dq_des = robot.update_task_space_command_qp_distributed(
             x_elbow_l_des, x_elbow_r_des, x_el, x_er,
             x_hand_l_des, x_hand_r_des, x_hl, x_hr,
@@ -512,14 +551,15 @@ def run_distributed_qp(robot: Robot, q_init: np.ndarray,
         elbow_l_error=el_e, elbow_r_error=er_e,
         solve_time_ms=(t1 - t0) * 1000,
         cbf_violation_count=n_cbf, cbf_violation_max=max_cbf,
-        joint_limit_violations=n_jl)
+        joint_limit_violations=n_jl,
+        error_trajectory=trajectory)
 
 
 def run_batched_qp(robot: Robot, q_init: np.ndarray,
                    x_hand_l_des, x_hand_r_des,
                    x_elbow_l_des, x_elbow_r_des,
                    com_des: np.ndarray, n_ik_iters: int = 1,
-                   n_batch: int = 128, q_perturb_sigma: float = 0.0
+                   n_batch: int = 128
                    ) -> TrialResult:
     """Method 3: Batched GPU QP (34-DOF, N parallel ADMM)."""
     dq = np.zeros(DOF, dtype=np.float32)
@@ -529,16 +569,24 @@ def run_batched_qp(robot: Robot, q_init: np.ndarray,
     # Reset GPU solver cache
     robot._gpu_qp_solver = None
 
+    trajectory = []
+
     t0 = time.perf_counter()
     for _ in range(n_ik_iters):
         (x_hl, x_hr, x_el, x_er,
          J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
+
+        err = (np.linalg.norm(x_hl[3:] - x_hand_l_des[3:]) +
+               np.linalg.norm(x_hr[3:] - x_hand_r_des[3:]) +
+               np.linalg.norm(x_el[3:] - x_elbow_l_des[3:]) +
+               np.linalg.norm(x_er[3:] - x_elbow_r_des[3:]))
+        trajectory.append(float(err))
+
         q_des, dq_des = robot.update_task_space_command_qp_gpu_batch(
             x_elbow_l_des, x_elbow_r_des, x_el, x_er,
             x_hand_l_des, x_hand_r_des, x_hl, x_hr,
             J_el, J_er, J_hl, J_hr, com_des,
-            n_batch=n_batch, max_iter=20,
-            q_perturb_sigma=q_perturb_sigma,
+            n_batch=n_batch, max_iter=50,
             pos_threshold=0.0)  # Disable ratchet for fair comparison
         q = q_des.copy()
         robot.update(q, dq_des)
@@ -554,7 +602,8 @@ def run_batched_qp(robot: Robot, q_init: np.ndarray,
         elbow_l_error=el_e, elbow_r_error=er_e,
         solve_time_ms=(t1 - t0) * 1000,
         cbf_violation_count=n_cbf, cbf_violation_max=max_cbf,
-        joint_limit_violations=n_jl)
+        joint_limit_violations=n_jl,
+        error_trajectory=trajectory)
 
 
 def run_batched_distributed_qp(robot: Robot, q_init: np.ndarray,
@@ -562,7 +611,9 @@ def run_batched_distributed_qp(robot: Robot, q_init: np.ndarray,
                                 x_elbow_l_des, x_elbow_r_des,
                                 com_des: np.ndarray, n_ik_iters: int = 1,
                                 n_batch: int = 128,
-                                q_perturb_sigma: float = 0.0
+                                max_iter: int = 50,
+                                q_ref: np.ndarray = None,
+                                w_ref: float = 0.0
                                 ) -> TrialResult:
     """Method 4: Batched Distributed GPU QP (2×13-DOF fused, N parallel ADMM)."""
     dq = np.zeros(DOF, dtype=np.float32)
@@ -572,17 +623,26 @@ def run_batched_distributed_qp(robot: Robot, q_init: np.ndarray,
     # Reset GPU solver cache
     robot._gpu_qp_solver_right = None
 
+    trajectory = []
+
     t0 = time.perf_counter()
     for _ in range(n_ik_iters):
         (x_hl, x_hr, x_el, x_er,
          J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
+
+        err = (np.linalg.norm(x_hl[3:] - x_hand_l_des[3:]) +
+               np.linalg.norm(x_hr[3:] - x_hand_r_des[3:]) +
+               np.linalg.norm(x_el[3:] - x_elbow_l_des[3:]) +
+               np.linalg.norm(x_er[3:] - x_elbow_r_des[3:]))
+        trajectory.append(float(err))
+
         q_des, dq_des = robot.update_task_space_command_qp_gpu_batch_distributed(
             x_elbow_l_des, x_elbow_r_des, x_el, x_er,
             x_hand_l_des, x_hand_r_des, x_hl, x_hr,
             J_el, J_er, J_hl, J_hr, com_des,
-            n_batch=n_batch, max_iter=20,
-            q_perturb_sigma=q_perturb_sigma,
-            pos_threshold=0.0)  # Disable ratchet for fair comparison
+            n_batch=n_batch, max_iter=max_iter,
+            pos_threshold=0.0,  # Disable ratchet for fair comparison
+            q_ref=q_ref, w_ref=w_ref)
         q = q_des.copy()
         robot.update(q, dq_des)
     t1 = time.perf_counter()
@@ -597,7 +657,65 @@ def run_batched_distributed_qp(robot: Robot, q_init: np.ndarray,
         elbow_l_error=el_e, elbow_r_error=er_e,
         solve_time_ms=(t1 - t0) * 1000,
         cbf_violation_count=n_cbf, cbf_violation_max=max_cbf,
-        joint_limit_violations=n_jl)
+        joint_limit_violations=n_jl,
+        error_trajectory=trajectory)
+
+
+def run_batched_distributed_alpha_qp(robot: Robot, q_init: np.ndarray,
+                                     x_hand_l_des, x_hand_r_des,
+                                     x_elbow_l_des, x_elbow_r_des,
+                                     com_des: np.ndarray, n_ik_iters: int = 1,
+                                     n_batch: int = 4096,
+                                     n_alpha: int = 8
+                                     ) -> TrialResult:
+    """Method 5: Max-feasible-α Batched Distributed GPU QP.
+    
+    Explores intermediate targets along line from current to desired.
+    Selects largest α whose solution is feasible and makes progress.
+    """
+    dq = np.zeros(DOF, dtype=np.float32)
+    q = q_init.copy()
+    robot.update(q, dq)
+
+    # Reset GPU solver cache
+    robot._gpu_qp_solver_right = None
+
+    trajectory = []
+
+    t0 = time.perf_counter()
+    for _ in range(n_ik_iters):
+        (x_hl, x_hr, x_el, x_er,
+         J_hl, J_hr, J_el, J_er) = compute_fk_and_jacobians(robot)
+
+        err = (np.linalg.norm(x_hl[3:] - x_hand_l_des[3:]) +
+               np.linalg.norm(x_hr[3:] - x_hand_r_des[3:]) +
+               np.linalg.norm(x_el[3:] - x_elbow_l_des[3:]) +
+               np.linalg.norm(x_er[3:] - x_elbow_r_des[3:]))
+        trajectory.append(float(err))
+
+        q_des, dq_des = robot.update_task_space_command_qp_gpu_batch_distributed_alpha(
+            x_elbow_l_des, x_elbow_r_des, x_el, x_er,
+            x_hand_l_des, x_hand_r_des, x_hl, x_hr,
+            J_el, J_er, J_hl, J_hr, com_des,
+            n_batch=n_batch, max_iter=50,
+            pos_threshold=0.0,  # Disable ratchet for fair comparison
+            n_alpha=n_alpha)
+        q = q_des.copy()
+        robot.update(q, dq_des)
+    t1 = time.perf_counter()
+
+    hl_e, hr_e, el_e, er_e = compute_tracking_errors(
+        robot, q, x_hand_l_des, x_hand_r_des, x_elbow_l_des, x_elbow_r_des)
+    n_cbf, max_cbf = check_cbf_violations(q, robot)
+    n_jl = check_joint_limit_violations(q)
+
+    return TrialResult(
+        hand_l_error=hl_e, hand_r_error=hr_e,
+        elbow_l_error=el_e, elbow_r_error=er_e,
+        solve_time_ms=(t1 - t0) * 1000,
+        cbf_violation_count=n_cbf, cbf_violation_max=max_cbf,
+        joint_limit_violations=n_jl,
+        error_trajectory=trajectory)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -768,8 +886,9 @@ def run_basin_escape_test(robot: Robot, q_init: np.ndarray,
         robot, q, x_hand_l_des, x_hand_r_des, x_elbow_l_des, x_elbow_r_des)
     single_cost = float(hl_e + hr_e)
 
+    # NOTE: max_iter=20 to match deployment conditions
     gpu_kwargs = dict(n_batch=n_batch, max_iter=20,
-                      q_perturb_sigma=0.0, pos_threshold=0.0)
+                      pos_threshold=0.0)
 
     solvers_to_test = [
         ('batched_full',
@@ -805,21 +924,32 @@ def run_basin_escape_test(robot: Robot, q_init: np.ndarray,
 # Main benchmark
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_benchmark(n_configs: int = 50, n_targets: int = 100,
-                  n_ik_iters: int = 1, n_batch: int = 128,
-                  q_perturb_sigma: float = 0.0,
-                  n_basin_configs: int = 100,
-                  n_basin_runs: int = 20,
-                  basin_perturb_sigma: float = 0.1,
+def run_benchmark(n_configs: int = 20, n_targets: int = 5,
+                  n_ik_iters: int = 50, n_batch: int = 4096,
+                  target_perturbation: float = 0.5,
                   seed: int = 42):
-    """Run the full benchmark suite.
+    """Run the multi-step IK convergence benchmark.
+
+    Each trial:
+      1. Sample a random initial config q_init
+      2. Generate a FAR target (large joint perturbation → FK)
+      3. Run each method for n_ik_iters differential IK steps
+         (re-linearize, solve QP, update q each step)
+      4. Record final tracking error and convergence trajectory
+
+    Far targets are essential: with close targets (small perturbation),
+    one step suffices and all methods converge equally.  With far targets,
+    the iterative re-linearization exposes differences in how methods
+    handle constraints and local minima.
 
     Args:
-        q_perturb_sigma: perturbation sigma for the main tracking benchmark
-            (set 0 for apples-to-apples single-solve comparison).
-        basin_perturb_sigma: perturbation sigma for basin-escape analysis.
-            MUST be > 0 for batch diversity to work — this is the mechanism
-            that gives each batch element a different linearization point.
+        n_configs: number of random initial configurations
+        n_targets: number of far targets per configuration
+        n_ik_iters: IK steps per trial (default 50)
+        n_batch: GPU batch size (default 4096)
+        target_perturbation: joint perturbation range (rad) for target
+            generation (default 0.5 — creates challenging far targets)
+        seed: random seed
     """
     rng = np.random.default_rng(seed)
     robot = Robot()
@@ -856,6 +986,7 @@ def run_benchmark(n_configs: int = 50, n_targets: int = 100,
         '2_distributed_qp': MethodStats(name='Distributed QP (ProxQP 2×13-DOF)'),
         '3_batched_qp': MethodStats(name=f'Batched QP (GPU {n_batch}×34-DOF)'),
         '4_batched_distributed': MethodStats(name=f'Batched Distributed (GPU {n_batch}×2×13-DOF)'),
+        '5_batched_alpha': MethodStats(name=f'Batched α-Continuation (GPU {n_batch}×n_alpha)'),
     }
 
     solvers = {
@@ -866,31 +997,36 @@ def run_benchmark(n_configs: int = 50, n_targets: int = 100,
         '2_distributed_qp': lambda r, q, hl, hr, el, er, c: run_distributed_qp(
             r, q, hl, hr, el, er, c, n_ik_iters),
         '3_batched_qp': lambda r, q, hl, hr, el, er, c: run_batched_qp(
-            r, q, hl, hr, el, er, c, n_ik_iters, n_batch, q_perturb_sigma),
+            r, q, hl, hr, el, er, c, n_ik_iters, n_batch),
         '4_batched_distributed': lambda r, q, hl, hr, el, er, c: run_batched_distributed_qp(
-            r, q, hl, hr, el, er, c, n_ik_iters, n_batch, q_perturb_sigma),
+            r, q, hl, hr, el, er, c, n_ik_iters, n_batch, max_iter=50),
+        '5_batched_alpha': lambda r, q, hl, hr, el, er, c: run_batched_distributed_alpha_qp(
+            r, q, hl, hr, el, er, c, n_ik_iters, n_batch),
     }
 
-    # ── Tracking accuracy & timing benchmark ─────────────────────────────────
-    print("=" * 80)
-    print("  IK SOLVER BENCHMARK")
+    # ── Multi-step convergence benchmark ─────────────────────────────────────
+    print("=" * 100)
+    print("  MULTI-STEP IK CONVERGENCE BENCHMARK")
     print(f"  {n_configs} configs × {n_targets} targets = {n_configs * n_targets} trials per method")
     print(f"  {n_ik_iters} IK iterations per trial | Batch size: {n_batch}")
-    print(f"  q_perturb_sigma: {q_perturb_sigma} | Seed: {seed}")
-    print("=" * 80)
+    print(f"  Target perturbation: {target_perturbation:.2f} rad (far targets)")
+    print(f"  Seed: {seed}")
+    print("=" * 100)
 
     total_trials = n_configs * n_targets
     trial_idx = 0
-    skipped_methods = set()  # Track methods that fail (e.g. no CUDA)
+    skipped_methods = set()
 
     for cfg_i in range(n_configs):
         q_init = generate_random_config(rng, robot)
 
         for tgt_j in range(n_targets):
             trial_idx += 1
-            # Generate reachable target from perturbed FK (CBF-safe)
+            # Generate FAR target (large perturbation)
             (x_hl_des, x_hr_des,
-             x_el_des, x_er_des) = generate_reachable_target(robot, q_init, rng)
+             x_el_des, x_er_des) = generate_reachable_target(
+                robot, q_init, rng,
+                perturbation_range=target_perturbation)
 
             for method_key, solver_fn in solvers.items():
                 if method_key in skipped_methods:
@@ -904,69 +1040,34 @@ def run_benchmark(n_configs: int = 50, n_targets: int = 100,
                     skipped_methods.add(method_key)
                     print(f"  ⚠ Skipping {methods[method_key].name}: {e}")
 
-            if trial_idx % 50 == 0 or trial_idx == total_trials:
+            if trial_idx % 10 == 0 or trial_idx == total_trials:
                 print(f"  [{trial_idx}/{total_trials}] trials complete")
 
-    # ── Basin-escape test ────────────────────────────────────────────────────
-    print(f"\n{'=' * 80}")
-    print(f"  BASIN-ESCAPE ANALYSIS")
-    print(f"  {n_basin_configs} configs × best-of-{n_basin_runs} perturbed starts each")
-    print(f"  basin_perturb_sigma: {basin_perturb_sigma}")
-    print(f"  GPU batch n_batch: {n_batch}")
-    print(f"  Evaluates: does best-of-B GPU batched solve from perturbed starts beat single-shot?")
-    print(f"{'=' * 80}")
-
-    basin_results = []
-    for cfg_i in range(n_basin_configs):
-        q_init = generate_random_config(rng, robot)
-        (x_hl_des, x_hr_des,
-         x_el_des, x_er_des) = generate_reachable_target(
-            robot, q_init, rng, perturbation_range=0.25)
-
-        res = run_basin_escape_test(
-            robot, q_init, x_hl_des, x_hr_des, x_el_des, x_er_des,
-            com_des, n_ik_iters=n_ik_iters,
-            n_candidates=n_basin_runs,
-            n_batch=n_batch,
-            perturb_sigma=basin_perturb_sigma,
-            rng=rng)
-        basin_results.append(res)
-        bf = res['batched_full']
-        bd = res['batched_distributed']
-        bf_str = (f"bestB_full={bf['best_cost']*1000:.1f}mm ({'✓' if bf['escaped'] else '✗'})"
-                  if bf else 'bestB_full=N/A (no GPU)')
-        bd_str = (f"bestB_dist={bd['best_cost']*1000:.1f}mm ({'✓' if bd['escaped'] else '✗'})"
-                  if bd else 'bestB_dist=N/A (no GPU)')
-        print(f"  Config {cfg_i+1}/{n_basin_configs}: "
-              f"single={res['single_cost']*1000:.1f}mm | {bf_str} | {bd_str}")
-
     # ── Print results ────────────────────────────────────────────────────────
-    print_results(methods, basin_results)
+    print_results(methods, n_ik_iters)
 
-    return methods, basin_results
+    return methods
 
 
-def print_results(methods: Dict[str, MethodStats],
-                  basin_results: List[Dict]):
-    """Print formatted benchmark results."""
-    print(f"\n{'=' * 100}")
-    print(f"{'BENCHMARK RESULTS':^100}")
-    print(f"{'=' * 100}")
+def print_results(methods: Dict[str, MethodStats], n_ik_iters: int):
+    """Print formatted multi-step convergence benchmark results."""
+    print(f"\n{'=' * 110}")
+    print(f"{'MULTI-STEP IK CONVERGENCE RESULTS  (' + str(n_ik_iters) + ' IK steps per trial)':^110}")
+    print(f"{'=' * 110}")
 
-    # ── Header ───────────────────────────────────────────────────────────────
-    header_fmt = "{:<40} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}"
+    # ── Final tracking error table ───────────────────────────────────────────
+    header_fmt = "{:<45} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}"
     print(header_fmt.format(
         'Method', 'Hand L', 'Hand R', 'Elbow L', 'Elbow R', 'Time', 'CBF'))
     print(header_fmt.format(
         '', '(mm)', '(mm)', '(mm)', '(mm)', '(ms)', 'Viol.'))
-    print("-" * 100)
+    print("-" * 110)
 
-    # ── Per-method rows ──────────────────────────────────────────────────────
-    row_fmt = "{:<40} {:>10.2f} {:>10.2f} {:>10.2f} {:>10.2f} {:>8.2f} {:>8d}"
+    row_fmt = "{:<45} {:>10.2f} {:>10.2f} {:>10.2f} {:>10.2f} {:>8.2f} {:>8d}"
     for key in sorted(methods.keys()):
         m = methods[key]
         if m.n == 0:
-            print(f"  {m.name:<40} {'(skipped — solver unavailable)':>60}")
+            print(f"  {m.name:<45} {'(skipped — solver unavailable)':>65}")
             continue
         print(row_fmt.format(
             m.name,
@@ -977,16 +1078,16 @@ def print_results(methods: Dict[str, MethodStats],
             m.mean('solve_time_ms'),
             m.total_cbf_violations()))
 
-    # ── Standard deviation ───────────────────────────────────────────────────
+    # ── Std dev ──────────────────────────────────────────────────────────────
     print()
     print("Standard deviations:")
-    print("-" * 100)
+    print("-" * 110)
     for key in sorted(methods.keys()):
         m = methods[key]
         if m.n == 0:
             continue
         print(row_fmt.format(
-            f"  ±{m.name[:36]}",
+            f"  ±{m.name[:41]}",
             m.std('hand_l_error') * 1000,
             m.std('hand_r_error') * 1000,
             m.std('elbow_l_error') * 1000,
@@ -1004,57 +1105,99 @@ def print_results(methods: Dict[str, MethodStats],
         total_jl = sum(t.joint_limit_violations for t in m.trials)
         print(f"  {m.name}: {total_jl}")
 
-    # ── Basin-escape summary ────────────────────────────────────────────
-    if basin_results:
-        print(f"\n{'=' * 100}")
-        print(f"{'BASIN-ESCAPE ANALYSIS  (best-of-B perturbed starts vs single-shot)':^100}")
-        print(f"{'=' * 100}")
+    # ── Convergence trajectory summary ───────────────────────────────────────
+    # Show mean error at selected IK steps across all trials
+    print(f"\n{'=' * 110}")
+    print(f"{'CONVERGENCE TRAJECTORY  (mean total EE position error in mm)':^110}")
+    print(f"{'=' * 110}")
 
-        single_costs = np.array([r['single_cost'] for r in basin_results])
+    # Select which steps to display (evenly spaced + final)
+    if n_ik_iters <= 10:
+        display_steps = list(range(n_ik_iters))
+    else:
+        display_steps = sorted(set(
+            [0, 1, 2, 5] +
+            list(range(0, n_ik_iters, max(1, n_ik_iters // 8))) +
+            [n_ik_iters - 1]))
+        display_steps = [s for s in display_steps if s < n_ik_iters]
 
-        for label, key in [('Best-of-B GPU Batched QP (34-DOF)', 'batched_full'),
-                           ('Best-of-B GPU Batched Distributed (2×13-DOF)', 'batched_distributed')]:
-            # Skip if GPU was unavailable (all entries are None)
-            if all(r.get(key) is None for r in basin_results):
-                print(f"\n  ── {label} ──")
-                print(f"    (skipped — GPU solver unavailable)")
+    # Header
+    step_labels = [f"Step {s}" for s in display_steps]
+    hdr = "{:<35}" + " {:>9}" * len(display_steps)
+    print(hdr.format("Method", *step_labels))
+    print("-" * (35 + 10 * len(display_steps)))
+
+    row = "{:<35}" + " {:>9.1f}" * len(display_steps)
+    for key in sorted(methods.keys()):
+        m = methods[key]
+        if m.n == 0:
+            continue
+        # Only include trials that have trajectory data
+        trajs = [t.error_trajectory for t in m.trials if t.error_trajectory]
+        if not trajs:
+            # SQP and other methods without trajectory — show just final
+            final_err = (m.mean('hand_l_error') + m.mean('hand_r_error') +
+                         m.mean('elbow_l_error') + m.mean('elbow_r_error')) * 1000
+            vals = [final_err] * len(display_steps)
+            print(row.format(m.name[:35], *vals) + "  (no trajectory)")
+            continue
+
+        mean_traj = np.mean(trajs, axis=0) * 1000  # convert to mm
+        vals = [float(mean_traj[s]) if s < len(mean_traj) else float('nan')
+                for s in display_steps]
+        print(row.format(m.name[:35], *vals))
+
+    # ── Pairwise comparison vs Single QP baseline ────────────────────────────
+    baseline_key = '1_single_qp'
+    if baseline_key in methods and methods[baseline_key].n > 0:
+        baseline = methods[baseline_key]
+        bl_final = np.array([
+            t.hand_l_error + t.hand_r_error + t.elbow_l_error + t.elbow_r_error
+            for t in baseline.trials])
+
+        print(f"\n{'=' * 110}")
+        print(f"{'PAIRWISE COMPARISON vs Single QP':^110}")
+        print(f"{'=' * 110}")
+        cmp_fmt = "{:<45}  {:>10}  {:>12}  {:>12}  {:>10}"
+        print(cmp_fmt.format("Method", "Final (mm)",
+                             "Δ vs Single", "% improve", "Wins"))
+        print("-" * 110)
+
+        for key in sorted(methods.keys()):
+            m = methods[key]
+            if m.n == 0 or key == baseline_key:
                 continue
-            # Filter to configs where this solver ran
-            valid = [r for r in basin_results if r.get(key) is not None]
-            print(f"\n  ── {label} ──")
-            escaped    = np.array([r[key]['escaped'] for r in valid])
-            best_costs = np.array([r[key]['best_cost'] for r in valid])
-            all_means  = np.array([r[key]['all_costs_mean'] for r in valid])
-            spreads    = np.array([r[key]['solution_spread_rad'] for r in valid])
-            n_basins   = np.array([r[key]['n_unique_basins'] for r in valid])
-            valid_single = np.array([r['single_cost'] for r in valid])
+            m_final = np.array([
+                t.hand_l_error + t.hand_r_error + t.elbow_l_error + t.elbow_r_error
+                for t in m.trials])
 
-            print(f"    Escape rate (best-of-B beats single): "
-                  f"{np.mean(escaped)*100:.1f}%  ({int(np.sum(escaped))}/{len(escaped)} configs)")
-            print(f"    Avg single-shot cost:    {np.mean(valid_single)*1000:.2f} mm")
-            print(f"    Avg best-of-B cost:      {np.mean(best_costs)*1000:.2f} mm")
-            print(f"    Avg mean-of-B cost:      {np.mean(all_means)*1000:.2f} mm")
-            denom = np.mean(valid_single)
-            improvement = (denom - np.mean(best_costs)) / denom * 100 if denom > 0 else 0.0
-            print(f"    Avg improvement (best):  {improvement:.1f}%")
-            print(f"    Avg solution spread:     {np.mean(spreads):.4f} rad")
-            print(f"    Avg DOFs with spread > 0.05 rad: {np.mean(n_basins):.1f} / 14")
+            avg_m = np.mean(m_final) * 1000
+            avg_bl = np.mean(bl_final) * 1000
+            delta = avg_m - avg_bl
+            pct = (avg_bl - avg_m) / avg_bl * 100 if avg_bl > 0 else 0
+            # Count trials where this method beats baseline
+            wins = int(np.sum(m_final < bl_final))
+            total = min(len(m_final), len(bl_final))
+            print(cmp_fmt.format(
+                m.name[:45],
+                f"{avg_m:.2f}",
+                f"{delta:+.2f} mm",
+                f"{pct:+.1f}%",
+                f"{wins}/{total}"))
 
-    print(f"\n{'=' * 100}")
+    print(f"\n{'=' * 110}")
 
-    return methods, basin_results
+    return methods
 
 
 def save_results_json(methods: Dict[str, MethodStats],
-                      basin_results: List[Dict],
                       filepath: str):
     """Save benchmark results to JSON."""
     import json
-    data = {
-        'methods': {},
-        'basin_escape': basin_results,
-    }
+    data = {'methods': {}}
     for key, m in methods.items():
+        # Collect per-trial trajectories
+        trajs = [t.error_trajectory for t in m.trials if t.error_trajectory]
         data['methods'][key] = {
             'name': m.name,
             'n_trials': m.n,
@@ -1071,6 +1214,8 @@ def save_results_json(methods: Dict[str, MethodStats],
             'total_cbf_violations': m.total_cbf_violations(),
             'total_joint_limit_violations': sum(
                 t.joint_limit_violations for t in m.trials),
+            'mean_trajectory_mm': (np.mean(trajs, axis=0) * 1000).tolist()
+                if trajs else [],
         }
     with open(filepath, 'w') as f:
         json.dump(data, f, indent=2)
@@ -1082,26 +1227,18 @@ def save_results_json(methods: Dict[str, MethodStats],
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='IK Solver Benchmark')
-    parser.add_argument('--n-configs', type=int, default=50,
-                        help='Number of random initial configurations (default: 50)')
-    parser.add_argument('--n-targets', type=int, default=10,
-                        help='Number of random targets per config (default: 10)')
-    parser.add_argument('--n-ik-iters', type=int, default=5,
-                        help='IK iterations per trial (default: 5)')
-    parser.add_argument('--n-batch', type=int, default=128,
-                        help='Batch size for GPU solvers (default: 128)')
-    parser.add_argument('--q-perturb-sigma', type=float, default=0.1,
-                        help='Q-perturbation sigma for batched methods (default: 0.1)')
-    parser.add_argument('--n-basin-configs', type=int, default=10,
-                        help='Number of configs for basin-escape test (default: 10)')
-    parser.add_argument('--n-basin-runs', type=int, default=20,
-                        help='Independent batch runs per basin config (default: 20)')
-    parser.add_argument('--basin-perturb-sigma', type=float, default=0.1,
-                        help='Q-perturbation sigma for basin-escape test (default: 0.1). '
-                             'MUST be > 0 for batch diversity to work.')
-    parser.add_argument('--sqp-max-iters', type=int, default=50,
-                        help='Max outer iterations for Global IK SQP baseline (default: 50)')
+    parser = argparse.ArgumentParser(
+        description='Multi-step IK Convergence Benchmark')
+    parser.add_argument('--n-configs', type=int, default=20,
+                        help='Number of random initial configurations (default: 20)')
+    parser.add_argument('--n-targets', type=int, default=5,
+                        help='Number of random targets per config (default: 5)')
+    parser.add_argument('--n-ik-iters', type=int, default=50,
+                        help='IK iterations per trial (default: 50)')
+    parser.add_argument('--n-batch', type=int, default=4096,
+                        help='Batch size for GPU solvers (default: 4096)')
+    parser.add_argument('--target-perturbation', type=float, default=0.5,
+                        help='Joint perturbation range (rad) for target gen (default: 0.5)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
     parser.add_argument('--quick', action='store_true',
@@ -1110,33 +1247,19 @@ if __name__ == '__main__':
                         help='Save results to JSON file (e.g. --save results.json)')
     args = parser.parse_args()
 
-    # overwriting args
-    args.n_configs = 10
-    args.n_targets = 10
-    args.n_basin_configs = 1
-    args.n_basin_runs = 5
-    args.n_ik_iters = 1
-    args.q_perturb_sigma = 0.1
-    args.basin_perturb_sigma = 0.1
-    args.n_batch = 4096
-
     if args.quick:
-        args.n_configs = 5
-        args.n_targets = 3
-        args.n_basin_configs = 3
-        args.n_basin_runs = 5
+        args.n_configs = 3
+        args.n_targets = 2
+        args.n_ik_iters = 20
 
-    methods, basin_results = run_benchmark(
+    methods = run_benchmark(
         n_configs=args.n_configs,
         n_targets=args.n_targets,
         n_ik_iters=args.n_ik_iters,
         n_batch=args.n_batch,
-        q_perturb_sigma=args.q_perturb_sigma,
-        n_basin_configs=args.n_basin_configs,
-        n_basin_runs=args.n_basin_runs,
-        basin_perturb_sigma=args.basin_perturb_sigma,
+        target_perturbation=args.target_perturbation,
         seed=args.seed,
     )
 
     if args.save:
-        save_results_json(methods, basin_results, args.save)
+        save_results_json(methods, args.save)

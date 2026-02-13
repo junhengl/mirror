@@ -322,17 +322,32 @@ class RetargetingNode:
             #     self.com_des
             # )
 
-            # Solve IK step (GPU-batched QP solver - single batch)
-            q_des, dq_des = self.robot.update_task_space_command_qp_gpu_batch_distributed(
+            # # Solve IK step (GPU-batched QP solver - single batch)
+            # q_des, dq_des = self.robot.update_task_space_command_qp_gpu_batch_distributed(
+            #             desired['x_elbow_l_des'], desired['x_elbow_r_des'], x_elbow_l, x_elbow_r,
+            #             desired['x_hand_l_des'], desired['x_hand_r_des'], x_hand_l, x_hand_r,
+            #             J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
+            #             self.com_des,
+            #             n_batch=4096, max_iter=20,
+            #             q_ref=self.q_ref,
+            #             w_ref=self.w_ref  # reference pose weight
+            # )
+
+            #  solve IK step with alpha regulation 
+            q_des, dq_des = self.robot.update_task_space_command_qp_gpu_batch_distributed_alpha(
                         desired['x_elbow_l_des'], desired['x_elbow_r_des'], x_elbow_l, x_elbow_r,
                         desired['x_hand_l_des'], desired['x_hand_r_des'], x_hand_l, x_hand_r,
                         J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
                         self.com_des,
                         n_batch=4096, max_iter=50,
-                        q_perturb_sigma=0.0,  # tunable
-                        q_ref=self.q_ref,
-                        w_ref=self.w_ref  # reference pose weight
+                        pos_threshold=0.005,
+                        q_ref=None,
+                        w_ref=0.0,
+                        n_alpha=8,
+                        delta_progress=0.001,
+                        dq_max=0.5
             )
+
             ik_time = time.perf_counter() - ik_start
             self.shared.update_timing('ik_solve', ik_time)
             print(f"[Retargeting] IK solve time: {ik_time*1000:.2f} ms")
