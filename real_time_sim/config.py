@@ -8,6 +8,8 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from .joint_mapping import JointMappingConfig
+
 
 @dataclass
 class SimConfig:
@@ -89,6 +91,38 @@ class FSMConfig:
     max_tracking_error: float = 0.5  # meters
 
 
+def _create_default_joint_mapping() -> JointMappingConfig:
+    """Create default joint mapping (MuJoCo ↔ KinDynLib convention).
+    
+    Dummy configuration: Identity + some example offsets.
+    Modify sign and offset arrays as needed for your robot.
+    
+    Layout (28 joints):
+      [right_leg(6), left_leg(6), right_arm(7), left_arm(7), head(2)]
+    """
+    # Sign: +1 keeps direction, -1 flips. All +1 for now (no flips).
+    sign = np.ones(28, dtype=np.float64)
+    sign[15] = -1.0  # elbow pitch R
+    sign[16] = -1.0  # forarm roll R
+    sign[17] = -1.0  # forarm pitch R
+    sign[18] = -1.0  # wrist roll R
+    sign[21] = -1.0  # upperarm yaw L
+    
+    # Offset: Zero-pose difference in radians. All 0 for now.
+    offset = np.zeros(28, dtype=np.float64)
+    offset[13] = -np.pi/2
+    offset[14] =  np.pi/2
+    offset[15] =  np.pi/2
+    offset[20] =  np.pi/2
+    offset[21] = -np.pi/2
+    offset[22] =  np.pi/2
+    
+    # Example: if right arm shoulder roll needs -0.2 rad offset:
+    # offset[13] = -0.2  # right_arm[1] = shoulder_roll
+    
+    return JointMappingConfig(sign=sign, offset=offset)
+
+
 @dataclass
 class PipelineConfig:
     """Master configuration for entire pipeline."""
@@ -97,6 +131,7 @@ class PipelineConfig:
     retarget: RetargetingConfig = field(default_factory=RetargetingConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     fsm: FSMConfig = field(default_factory=FSMConfig)
+    joint_mapping: JointMappingConfig = field(default_factory=_create_default_joint_mapping)
     
     # Verbose/debug flags
     verbose: bool = False

@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 
 from ..shared_state import SharedState, ArmTrackingData, RetargetingOutput, RobotState
 from ..config import RetargetingConfig, PipelineConfig
+from ..joint_mapping import JointMapping
 
 
 class RetargetingNode:
@@ -41,13 +42,16 @@ class RetargetingNode:
         self.themis_const = themis_const
         self.Xtrans = Xtrans
         
+        # Joint mapping (MuJoCo ↔ KinDynLib)
+        self.joint_mapping = JointMapping(config.joint_mapping)
+        
         # Initialize robot model
         print("[Retargeting] Initializing robot model...")
         self.robot = Robot()
         
         # Robot dimensions
-        self.hand_r_offset = np.array([0.0, -0.08, 0.0], dtype=np.float64)
-        self.hand_l_offset = np.array([0.0, 0.08, 0.0], dtype=np.float64)
+        self.hand_r_offset = np.array([0.08, 0.0, 0.0], dtype=np.float64)
+        self.hand_l_offset = np.array([0.08, 0.0, 0.0], dtype=np.float64)
         self.elbow_r_offset = np.array([0.0, -0.0, 0.0], dtype=np.float64)
         self.elbow_l_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         
@@ -58,8 +62,8 @@ class RetargetingNode:
         self.Xelbow_r = Xtrans(self.elbow_r_offset)
         
         # Link indices
-        self.hand_r_link = 22
-        self.hand_l_link = 29
+        self.hand_r_link = 23
+        self.hand_l_link = 30
         self.elbow_r_link = 21
         self.elbow_l_link = 28
         
@@ -288,10 +292,13 @@ class RetargetingNode:
         desired = self._transform_zed_to_robot(tracking)
         
         # Warm start from feedback (add floating base)
+        # Map feedback from MuJoCo to KinDynLib convention before IK
+        q_kin = self.joint_mapping.forward_q(feedback.q)
+        dq_kin = self.joint_mapping.forward_dq(feedback.dq)
         q_current = np.zeros(self.themis_const.DOF, dtype=np.float64)
-        q_current[6:6+28] = feedback.q
+        q_current[6:6+28] = q_kin
         dq_current = np.zeros(self.themis_const.DOF, dtype=np.float64)
-        dq_current[6:6+28] = feedback.dq
+        dq_current[6:6+28] = dq_kin
         
         # IK iterations
         for _ in range(self.retarget_config.num_ik_iterations):
@@ -347,6 +354,8 @@ class RetargetingNode:
                         delta_progress=0.001,
                         dq_max=0.5
             )
+            # q_des *= 0.0
+            # q_des [18] = -np.pi/2
 
             ik_time = time.perf_counter() - ik_start
             self.shared.update_timing('ik_solve', ik_time)

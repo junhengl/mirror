@@ -88,6 +88,9 @@ class PDController:
         
         # Position error
         q_error = q_des - q
+
+        # print(f"q_des: {q_des}")
+        # print(f"q: {q}")
         
         # Handle angle wrapping for error (keep error in [-pi, pi])
         # q_error = np.arctan2(np.sin(q_error), np.cos(q_error))

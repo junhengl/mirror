@@ -16,6 +16,7 @@ from typing import Optional
 
 from ..shared_state import SharedState, RobotState, ArmTrackingData, RetargetingOutput
 from ..config import FSMConfig, PipelineConfig
+from ..joint_mapping import JointMapping
 
 
 class FSMController:
@@ -32,13 +33,14 @@ class FSMController:
         self.config = config
         self.fsm_config = config.fsm
         self.shared = shared_state
+        self.joint_mapping = JointMapping(config.joint_mapping)
         
         # State timing
         self.state_entry_time = time.time()
         self.current_state = RobotState.INIT
         
-        # Default pose (standing with arms slightly forward)
-        self.default_q = np.array([
+        # Default pose in MuJoCo convention (matches mujoco_sim._initialize_robot)
+        default_q_muj = np.array([
             # Right leg
             0.0, 0.0, -0.1, 0.2, -0.1, 0.0,
             # Left leg  
@@ -50,6 +52,8 @@ class FSMController:
             # Head
             0.0, 0.0
         ], dtype=np.float64)
+        # Convert to KinDynLib convention (all PD control runs in this space)
+        self.default_q = self.joint_mapping.forward_q(default_q_muj)
         
         # Safety hold position
         self.safety_hold_q: Optional[np.ndarray] = None
@@ -78,7 +82,7 @@ class FSMController:
             # Setup for new state
             if new_state == RobotState.SAFETY_STOP:
                 feedback = self.shared.get_robot_feedback()
-                self.safety_hold_q = feedback.q.copy()
+                self.safety_hold_q = self.joint_mapping.forward_q(feedback.q)
     
     def time_in_state(self) -> float:
         """Get time spent in current state."""
@@ -137,7 +141,7 @@ class FSMController:
             return self._handle_safety_stop(feedback)
             
         elif self.current_state == RobotState.SHUTDOWN:
-            return feedback.q.copy()  # Hold current position
+            return self.joint_mapping.forward_q(feedback.q)  # Hold current position
             
         return self.default_q.copy()
     
@@ -150,7 +154,7 @@ class FSMController:
         t = self.time_in_state()
         
         if self.blend_start_q is None:
-            self.blend_start_q = feedback.q.copy()
+            self.blend_start_q = self.joint_mapping.forward_q(feedback.q)
             self.blend_target_q = self.default_q.copy()
             
         # Blend factor (0 to 1)
@@ -174,7 +178,7 @@ class FSMController:
         # Check for valid tracking to start
         if tracking_valid and retarget.valid:
             # Start blending to tracking
-            self.blend_start_q = feedback.q.copy()
+            self.blend_start_q = self.joint_mapping.forward_q(feedback.q)
             self.blend_start_time = time.time()
             self.set_state(RobotState.TRACKING)
             
@@ -187,12 +191,12 @@ class FSMController:
         # Check safety
         if not self.check_safety(feedback, retarget):
             self.set_state(RobotState.SAFETY_STOP)
-            return feedback.q.copy()
+            return self.joint_mapping.forward_q(feedback.q)
         
         # Check for tracking loss
         if not tracking_valid:
             print("[FSM] Tracking lost, returning to IDLE")
-            self.blend_start_q = feedback.q.copy()
+            self.blend_start_q = self.joint_mapping.forward_q(feedback.q)
             self.set_state(RobotState.IDLE)
             return self._blend_to_default(feedback)
         
@@ -210,7 +214,7 @@ class FSMController:
         if retarget.valid:
             return retarget.q_des.copy()
         else:
-            return feedback.q.copy()
+            return self.joint_mapping.forward_q(feedback.q)
     
     def _handle_safety_stop(self, feedback) -> np.ndarray:
         """
@@ -218,7 +222,7 @@ class FSMController:
         """
         if self.safety_hold_q is not None:
             return self.safety_hold_q.copy()
-        return feedback.q.copy()
+        return self.joint_mapping.forward_q(feedback.q)
     
     def _blend_to_default(self, feedback) -> np.ndarray:
         """Helper to blend current position toward default."""

@@ -117,19 +117,19 @@ r = np.array([
     # Right arm chain
     [-0.065084608, -0.1567, 0.113474882], # UPPERSHOULDER_R from BASE
     [0.0, 0.0, 0.0],                       # LOWERSHOULDER_R from UPPERSHOULDER_R
-    [0.0, -0.06, 0.0],                       # UPPERARM_R from LOWERSHOULDER_R
-    [0.0, -0.16, 0.0],                # ELBOW_R from UPPERARM_R
-    [0.0, -0.08, 0.0],     # FOREARM_R from ELBOW_R
-    [0.0, -0.08, 0.0],                       # UPPERWRIST_R from FOREARM_R
-    [0.0, -0.08, 0.0],                       # LOWERWRIST_R from UPPERWRIST_R
+    [0.0, 0.0, -0.06],                       # UPPERARM_R from LOWERSHOULDER_R
+    [0.0, 0.0, -0.16],                # ELBOW_R from UPPERARM_R
+    [0.08, 0.0, 0.0],     # FOREARM_R from ELBOW_R
+    [0.08, 0.0, 0.0],                       # UPPERWRIST_R from FOREARM_R
+    [0.08, 0.0, 0.0],                       # LOWERWRIST_R from UPPERWRIST_R
     # Left arm chain
     [-0.065084608, 0.1567, 0.113474882],  # UPPERSHOULDER_L from BASE
     [0.0, 0.0, 0.0],                       # LOWERSHOULDER_L from UPPERSHOULDER_L
-    [0.0, 0.06, 0.0],                       # UPPERARM_L from LOWERSHOULDER_L
-    [0.0, 0.16, 0.0],                 # ELBOW_L from UPPERARM_L
-    [0.0, 0.08, 0.0],             # FOREARM_L from ELBOW_L
-    [0.0, 0.08, 0.0],                       # UPPERWRIST_L from FOREARM_L
-    [0.0, 0.08, 0.0],                       # LOWERWRIST_L from UPPERWRIST_L
+    [0.0, 0.0, -0.06],                       # UPPERARM_L from LOWERSHOULDER_L
+    [0.0, 0.0, -0.16],                 # ELBOW_L from UPPERARM_L
+    [0.08, 0.0, 0.0],             # FOREARM_L from ELBOW_L
+    [0.08, 0.0, 0.0],                       # UPPERWRIST_L from FOREARM_L
+    [0.08, 0.0, 0.0],                       # LOWERWRIST_L from UPPERWRIST_L
     # Head
     [-0.069373655, 0.0, 0.230835692],     # NECK from BASE
     [0.0, 0.0, 0.0],                       # HEAD from NECK

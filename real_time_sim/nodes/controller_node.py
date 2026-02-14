@@ -14,6 +14,7 @@ from ..shared_state import SharedState, RobotState
 from ..config import ControlConfig, PipelineConfig
 from ..control.pd_controller import PDController
 from ..control.fsm import FSMController
+from ..joint_mapping import JointMapping
 
 
 class ControllerNode:
@@ -31,6 +32,7 @@ class ControllerNode:
         # Initialize controllers
         self.pd_controller = PDController(config)
         self.fsm = FSMController(config, shared_state)
+        self.joint_mapping = JointMapping(config.joint_mapping)
         
         # Thread state
         self.running = False
@@ -70,7 +72,11 @@ class ControllerNode:
             # Get robot feedback
             feedback = self.shared.get_robot_feedback()
             
-            # Update FSM and get desired joint positions
+            # Map feedback from MuJoCo convention → KinDynLib convention
+            q_mapped = self.joint_mapping.forward_q(feedback.q)
+            dq_mapped = self.joint_mapping.forward_dq(feedback.dq)
+            
+            # Update FSM and get desired joint positions (KinDynLib convention)
             q_des = self.fsm.update()
             
             # Get desired velocities from retargeting output (if in tracking mode)
@@ -80,13 +86,16 @@ class ControllerNode:
             else:
                 dq_des = np.zeros(28, dtype=np.float64)
             
-            # Compute PD torques
-            torques = self.pd_controller.compute_torque(
-                feedback.q,
-                feedback.dq,
+            # Compute PD torques in KinDynLib convention
+            torques_kin = self.pd_controller.compute_torque(
+                q_mapped,
+                dq_mapped,
                 q_des,
                 dq_des
             )
+            
+            # Map torques back to MuJoCo convention
+            torques = self.joint_mapping.reverse_torque(torques_kin)
 
             # # test torque commands:
             # torques = np.array([
@@ -113,7 +122,7 @@ class ControllerNode:
             
             # Track diagnostics
             self.last_tracking_error, _, _ = self.pd_controller.get_tracking_error(
-                feedback.q, q_des
+                q_mapped, q_des
             )
             
             # Update timing stats

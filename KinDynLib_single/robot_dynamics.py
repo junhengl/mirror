@@ -47,8 +47,8 @@ class Robot:
         joint_types = ["Px", "Py", "Pz", "Rx", "Ry", "Rz",
                        "Rz", "Rx", "Ry", "Ry", "Ry", "Rx",
                        "Rz", "Rx", "Ry", "Ry", "Ry", "Rx",
-                       "Ry", "Rx", "Ry", "Rx", "Ry", "Rx", "Ry",
-                       "Ry", "Rx", "Ry", "Rx", "Ry", "Rx", "Ry",
+                       "Ry", "Rx", "Rz", "Ry", "Rx", "Ry", "Rx",
+                       "Ry", "Rx", "Rz", "Ry", "Rx", "Ry", "Rx",
                        "Rz", "Ry"]
         
         # Use robot constants (already numpy arrays)

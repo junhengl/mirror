@@ -109,8 +109,8 @@ HAND_L_LINK = 29
 ELBOW_R_LINK = 21
 ELBOW_L_LINK = 28
 
-HAND_R_OFFSET = np.array([0.0, -0.08, 0.0], dtype=np.float64)
-HAND_L_OFFSET = np.array([0.0, 0.08, 0.0], dtype=np.float64)
+HAND_R_OFFSET = np.array([0.08, 0.0, 0.0], dtype=np.float64)
+HAND_L_OFFSET = np.array([0.08, 0.0, 0.0], dtype=np.float64)
 ELBOW_R_OFFSET = np.array([0.0, 0.0, 0.0], dtype=np.float64)
 ELBOW_L_OFFSET = np.array([0.0, 0.0, 0.0], dtype=np.float64)
 
@@ -986,7 +986,10 @@ def run_benchmark(n_configs: int = 20, n_targets: int = 5,
         '2_distributed_qp': MethodStats(name='Distributed QP (ProxQP 2×13-DOF)'),
         '3_batched_qp': MethodStats(name=f'Batched QP (GPU {n_batch}×34-DOF)'),
         '4_batched_distributed': MethodStats(name=f'Batched Distributed (GPU {n_batch}×2×13-DOF)'),
-        '5_batched_alpha': MethodStats(name=f'Batched α-Continuation (GPU {n_batch}×n_alpha)'),
+        '5a_alpha_B8': MethodStats(name='α-Continuation (B=8)'),
+        '5b_alpha_B64': MethodStats(name='α-Continuation (B=64)'),
+        '5c_alpha_B512': MethodStats(name='α-Continuation (B=512)'),
+        '5d_alpha_B2048': MethodStats(name='α-Continuation (B=2048)'),
     }
 
     solvers = {
@@ -1000,8 +1003,14 @@ def run_benchmark(n_configs: int = 20, n_targets: int = 5,
             r, q, hl, hr, el, er, c, n_ik_iters, n_batch),
         '4_batched_distributed': lambda r, q, hl, hr, el, er, c: run_batched_distributed_qp(
             r, q, hl, hr, el, er, c, n_ik_iters, n_batch, max_iter=50),
-        '5_batched_alpha': lambda r, q, hl, hr, el, er, c: run_batched_distributed_alpha_qp(
-            r, q, hl, hr, el, er, c, n_ik_iters, n_batch),
+        '5a_alpha_B8': lambda r, q, hl, hr, el, er, c: run_batched_distributed_alpha_qp(
+            r, q, hl, hr, el, er, c, n_ik_iters, n_batch=8),
+        '5b_alpha_B64': lambda r, q, hl, hr, el, er, c: run_batched_distributed_alpha_qp(
+            r, q, hl, hr, el, er, c, n_ik_iters, n_batch=64),
+        '5c_alpha_B512': lambda r, q, hl, hr, el, er, c: run_batched_distributed_alpha_qp(
+            r, q, hl, hr, el, er, c, n_ik_iters, n_batch=512),
+        '5d_alpha_B2048': lambda r, q, hl, hr, el, er, c: run_batched_distributed_alpha_qp(
+            r, q, hl, hr, el, er, c, n_ik_iters, n_batch=2048),
     }
 
     # ── Multi-step convergence benchmark ─────────────────────────────────────
