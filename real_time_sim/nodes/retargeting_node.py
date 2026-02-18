@@ -359,7 +359,7 @@ class RetargetingNode:
 
             ik_time = time.perf_counter() - ik_start
             self.shared.update_timing('ik_solve', ik_time)
-            print(f"[Retargeting] IK solve time: {ik_time*1000:.2f} ms")
+            # print(f"[Retargeting] IK solve time: {ik_time*1000:.2f} ms")
 
             # Check for NaN/Inf after IK solve
             if not np.all(np.isfinite(q_des)) or not np.all(np.isfinite(dq_des)):

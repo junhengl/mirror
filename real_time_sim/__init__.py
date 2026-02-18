@@ -13,8 +13,24 @@ Usage:
 
 from .config import PipelineConfig, DEFAULT_CONFIG
 from .shared_state import SharedState, RobotState
-from .simulation import MuJoCoSimulation
-from .nodes import BodyTrackingNode, RetargetingNode, ControllerNode
+
+# Lazy imports — MuJoCo and controller may not be available in all environments
+try:
+    from .simulation import MuJoCoSimulation
+except ImportError:
+    MuJoCoSimulation = None
+
+try:
+    from .nodes import BodyTrackingNode, RetargetingNode, ControllerNode
+except ImportError:
+    # Fall back to individual imports if controller pulls in unavailable deps
+    try:
+        from .nodes.body_tracking_node import BodyTrackingNode
+        from .nodes.retargeting_node import RetargetingNode
+    except ImportError:
+        BodyTrackingNode = None
+        RetargetingNode = None
+    ControllerNode = None
 
 __all__ = [
     'PipelineConfig',
