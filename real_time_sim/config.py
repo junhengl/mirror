@@ -102,6 +102,8 @@ def _create_default_joint_mapping() -> JointMappingConfig:
     """
     # Sign: +1 keeps direction, -1 flips. All +1 for now (no flips).
     sign = np.ones(28, dtype=np.float64)
+    sign[12] = -1.0  # shoulder pitch R
+    sign[19] = -1.0  # shoulder pitch L
     sign[15] = -1.0  # elbow pitch R
     sign[16] = -1.0  # forarm roll R
     sign[17] = -1.0  # forarm pitch R
@@ -111,7 +113,7 @@ def _create_default_joint_mapping() -> JointMappingConfig:
     # Offset: Zero-pose difference in radians. All 0 for now.
     offset = np.zeros(28, dtype=np.float64)
     offset[13] = -np.pi/2
-    offset[14] =  np.pi/2
+    offset[14] = -np.pi/2
     offset[15] =  np.pi/2
     offset[20] =  np.pi/2
     offset[21] = -np.pi/2

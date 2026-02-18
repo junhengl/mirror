@@ -77,6 +77,7 @@ from real_time_sim.nodes.retargeting_node import RetargetingNode
 from real_time_sim.joint_mapping import JointMapping
 
 from hw_interface.themis_udp_client import ThemisUDPClient, ThemisStateFeedback
+from hw_interface.hw_visualizer import HardwareVisualizer
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -85,7 +86,7 @@ from hw_interface.themis_udp_client import ThemisUDPClient, ThemisStateFeedback
 IDLE_R_HW = np.array([-0.20, +1.40, +1.57, +0.40,  0.00,  0.00, -1.50])
 IDLE_L_HW = np.array([-0.20, -1.40, -1.57, -0.40,  0.00,  0.00, +1.50])
 
-KP_SOFT = np.full(7, 30.0)
+KP_SOFT = np.full(7, 20.0)
 KD_SOFT = np.full(7,  2.0)
 
 MSG_ARM_JOINT_CMD = 0x10
@@ -438,6 +439,8 @@ def main():
                         help="No real robot (mock UDP client)")
     parser.add_argument("--hang-height", type=float, default=1.3,
                         help="Robot height for IK (default: 1.3 m)")
+    parser.add_argument("--no-viz", action="store_true",
+                        help="Disable MuJoCo visualization window")
     args = parser.parse_args()
 
     # Gains
@@ -456,6 +459,7 @@ def main():
     print(f"  Max vel:     {args.max_vel:.1f} rad/s")
     print(f"  Camera:      {'dummy' if args.no_camera else 'ZED'}")
     print(f"  Dry-run:     {args.dry_run}")
+    print(f"  Visualizer:  {'OFF' if args.no_viz else 'ON'}")
     print("=" * 72)
 
     # ── Config ───────────────────────────────────────────────────────
@@ -506,9 +510,18 @@ def main():
     retargeter = RetargetingNode(config, shared)
     tracker = BodyTrackingNode(config, shared)
 
+    # ── Visualizer (separate thread, ~30 Hz) ─────────────────────────
+    viz = None
+    if not args.no_viz:
+        viz = HardwareVisualizer(shared, config)
+
     try:
         retargeter.start()
         tracker.start()
+
+        # Launch viewer after nodes are up (needs a valid SharedState)
+        if viz is not None:
+            viz.start()
 
         print("[Main] All nodes started — entering 1 kHz command loop\n")
 
@@ -527,6 +540,8 @@ def main():
     finally:
         print("\n[Main] Shutting down …")
         shared.request_shutdown()
+        if viz is not None:
+            viz.stop()
         tracker.stop()
         retargeter.stop()
         fb_thread.stop()

@@ -319,7 +319,7 @@ class RetargetingNode:
             # timer for IK solve
             ik_start = time.perf_counter()
 
-            # # Solve IK step (QP solver: distributed ProxQP)
+            # Solve IK step (QP solver: distributed ProxQP)
             # q_des, dq_des = self.robot.update_task_space_command_qp_distributed(
             #     desired['x_elbow_l_des'], desired['x_elbow_r_des'],
             #     x_elbow_l, x_elbow_r,
@@ -355,11 +355,16 @@ class RetargetingNode:
                         dq_max=0.5
             )
             # q_des *= 0.0
-            # q_des [18] = -np.pi/2
+            # q_des [18] = -np.pi/6
+            # q_des [25] = -np.pi/6
+            # q_des [19] = -np.pi/6
+            # q_des [26] = np.pi/6
+            # q_des [21] = np.pi/2
+            # q_des [28] = np.pi/2
 
             ik_time = time.perf_counter() - ik_start
             self.shared.update_timing('ik_solve', ik_time)
-            # print(f"[Retargeting] IK solve time: {ik_time*1000:.2f} ms")
+            print(f"[Retargeting] IK solve time: {ik_time*1000:.2f} ms")
 
             # Check for NaN/Inf after IK solve
             if not np.all(np.isfinite(q_des)) or not np.all(np.isfinite(dq_des)):
