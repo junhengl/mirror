@@ -10,7 +10,7 @@ import time
 import threading
 from typing import Optional
 
-from ..shared_state import SharedState, ArmTrackingData
+from ..shared_state import SharedState, ArmTrackingData, HandTrackingData
 from ..config import TrackingConfig, PipelineConfig
 
 
@@ -107,6 +107,10 @@ class BodyTrackingNode:
             ),
         }
         
+        # Last valid hand open/close ratios (zero-order hold)
+        self._last_l_oc = 0.0
+        self._last_r_oc = 0.0
+
         # Thread state
         self.running = False
         self.thread: Optional[threading.Thread] = None
@@ -213,8 +217,12 @@ class BodyTrackingNode:
                 # Extract arm data
                 arm_data = self._extract_arm_data(bodies)
                 
+                # Extract hand/finger data
+                hand_data = self._extract_hand_data(bodies)
+                
                 # Publish to shared state
                 self.shared.set_tracking_data(arm_data)
+                self.shared.set_hand_tracking_data(hand_data)
                 
                 # Update timing stats
                 self.frame_count += 1
@@ -317,6 +325,70 @@ class BodyTrackingNode:
             right_confidence=min(_safe_conf(15), _safe_conf(17)),
         )
     
+    def _extract_hand_data(self, bodies) -> HandTrackingData:
+        """Hand open/close from dist(middle_fingertip, wrist).
+
+        No filtering here — the 1 kHz command loop applies a per-motor
+        velocity clamp which gives smooth hardware motion.
+        Invalid frames hold the previous value.
+        """
+        if len(bodies.body_list) == 0:
+            return HandTrackingData(
+                timestamp=time.time(), valid=False,
+                left_open_close=self._last_l_oc,
+                right_open_close=self._last_r_oc,
+            )
+
+        body = bodies.body_list[0]
+        kp = body.keypoint
+        conf = body.keypoint_confidence
+
+        def _safe_kp(idx):
+            p = np.array([kp[idx][0], kp[idx][1], kp[idx][2]], dtype=np.float64)
+            return (p, True) if not np.any(np.isnan(p)) else (np.zeros(3), False)
+
+        def _safe_conf(idx):
+            c = float(conf[idx])
+            return c if not np.isnan(c) else 0.0
+
+        # Finger keypoints have low confidence — accept anything > 5
+        HAND_CONF = 5.0
+
+        # Distance thresholds (metres) — tune to your operator
+        D_CLOSED = 0.14
+        D_OPEN   = 0.05
+
+        def _ratio(d):
+            return float(np.clip((d - D_CLOSED) / (D_OPEN - D_CLOSED), 0.0, 1.0))
+
+        # Left hand: kp34 (MIDDLE_4) ↔ kp16 (WRIST)
+        l_w, lw_ok = _safe_kp(16)
+        l_m, lm_ok = _safe_kp(34)
+        if lw_ok and lm_ok and min(_safe_conf(16), _safe_conf(34)) > HAND_CONF:
+            l_dist = abs(np.linalg.norm(l_w) - np.linalg.norm(l_m))
+            self._last_l_oc = _ratio(l_dist)
+
+        # Right hand: kp35 (MIDDLE_4) ↔ kp17 (WRIST)
+        r_w, rw_ok = _safe_kp(17)
+        r_m, rm_ok = _safe_kp(35)
+        if rw_ok and rm_ok and min(_safe_conf(17), _safe_conf(35)) > HAND_CONF:
+            r_dist = abs(np.linalg.norm(r_w) - np.linalg.norm(r_m))
+            self._last_r_oc = _ratio(r_dist)
+
+        # Debug every ~2 s
+        if self.frame_count == 1:
+            l_dist = abs(np.linalg.norm(l_w) - np.linalg.norm(l_m)) if (lw_ok and lm_ok) else 0.0
+            r_dist = abs(np.linalg.norm(r_w) - np.linalg.norm(r_m)) if (rw_ok and rm_ok) else 0.0
+            print(f"[Hand] LEFT: wrist={l_w} middle={l_m} dist={l_dist:.3f}m oc={self._last_l_oc:.2f} | "
+                  f"RIGHT: wrist={r_w} middle={r_m} dist={r_dist:.3f}m oc={self._last_r_oc:.2f}")
+
+        return HandTrackingData(
+            timestamp=time.time(),
+            valid=True,
+            left_open_close=self._last_l_oc,
+            right_open_close=self._last_r_oc,
+        )
+
     def _dummy_tracking_loop(self):
         """Dummy tracking for testing without camera."""
         print("[Tracking] Running dummy tracking mode")
@@ -358,7 +430,20 @@ class BodyTrackingNode:
             )
             
             self.shared.set_tracking_data(arm_data)
-            
+
+            # Dummy hand tracking — sinusoidal open/close
+            oc = 0.5 * (1.0 - np.cos(2.0 * np.pi * t / 4.0))  # period 4 s
+            sp = 0.5 * (1.0 - np.cos(2.0 * np.pi * t / 6.0))  # period 6 s
+            hand_data = HandTrackingData(
+                timestamp=time.time(),
+                valid=True,
+                left_open_close=oc,
+                left_split=sp,
+                right_open_close=oc,
+                right_split=sp,
+            )
+            self.shared.set_hand_tracking_data(hand_data)
+
             # Update timing stats
             self.frame_count += 1
             if time.time() - self.last_stats_time >= 2.0:

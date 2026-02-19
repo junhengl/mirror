@@ -20,4 +20,6 @@
     4.2 Real robot no camera:
         .venv/bin/python hw_interface/integrated_hw_wbc.py --no-camera
     4.3 Real robot and ZED:
-        sudo .venv/bin/python hw_interface/integrated_hw_wbc.py
+        sudo .venv/bin/python hw_interface/integrated_hw_wbc.py --no-viz
+
+

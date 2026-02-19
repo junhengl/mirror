@@ -30,15 +30,20 @@ from typing import Optional
 
 
 # ── Message types (must match shm_udp_server.py) ────────────────────
-MSG_STATE_REQUEST     = 0x01
-MSG_STATE_RESPONSE    = 0x02
-MSG_ARM_JOINT_CMD     = 0x10
-MSG_MANIP_REF         = 0x11
-MSG_HEARTBEAT         = 0x20
-MSG_ACK               = 0xFE
+MSG_STATE_REQUEST       = 0x01
+MSG_STATE_RESPONSE      = 0x02
+MSG_HAND_STATE_REQUEST  = 0x03
+MSG_HAND_STATE_RESPONSE = 0x04
+MSG_ARM_JOINT_CMD       = 0x10
+MSG_MANIP_REF           = 0x11
+MSG_HAND_JOINT_CMD      = 0x12
+MSG_HEARTBEAT           = 0x20
+MSG_ACK                 = 0xFE
 
-SIDE_RIGHT = 2      # +2 in the AOS convention
-SIDE_LEFT  = 0xFE   # -2 stored as unsigned byte
+SIDE_RIGHT      = 2      # +2 in the AOS convention
+SIDE_LEFT       = 0xFE   # -2 stored as unsigned byte
+SIDE_RIGHT_HAND = 3      # +3
+SIDE_LEFT_HAND  = 0xFD   # -3 stored as unsigned byte
 
 
 @dataclass
@@ -72,6 +77,25 @@ class ThemisStateFeedback:
     imu_gyro:         np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
 
 
+@dataclass
+class ThemisHandFeedback:
+    """Parsed hand (DXL) state feedback from the UDP bridge."""
+    timestamp: float = 0.0
+    valid: bool = False
+
+    # Hand joint states (7 DXL motors each)
+    # [0:1] = finger 1 flex (2 DOF: prox, dist)
+    # [2:3] = finger 2 flex (2 DOF: prox, dist)
+    # [4:5] = finger 3 flex (2 DOF: prox, dist)
+    # [6]   = finger split
+    right_hand_q:      np.ndarray = field(default_factory=lambda: np.zeros(7, dtype=np.float64))
+    right_hand_dq:     np.ndarray = field(default_factory=lambda: np.zeros(7, dtype=np.float64))
+    right_hand_torque: np.ndarray = field(default_factory=lambda: np.zeros(7, dtype=np.float64))
+    left_hand_q:       np.ndarray = field(default_factory=lambda: np.zeros(7, dtype=np.float64))
+    left_hand_dq:      np.ndarray = field(default_factory=lambda: np.zeros(7, dtype=np.float64))
+    left_hand_torque:  np.ndarray = field(default_factory=lambda: np.zeros(7, dtype=np.float64))
+
+
 class ThemisUDPClient:
     """Desktop-side UDP client for Themis robot communication."""
 
@@ -79,6 +103,13 @@ class ThemisUDPClient:
     ARM_JOINT_NAMES = [
         "shoulder_pitch", "shoulder_roll", "shoulder_yaw",
         "elbow_pitch", "elbow_yaw", "wrist_pitch", "wrist_yaw",
+    ]
+
+    HAND_JOINT_NAMES = [
+        "finger1_prox", "finger1_dist",
+        "finger2_prox", "finger2_dist",
+        "finger3_prox", "finger3_dist",
+        "finger_split",
     ]
 
     # ── Default PD gains (from bear_macros.py) ───────────────────────
@@ -287,6 +318,80 @@ class ThemisUDPClient:
             return len(resp) >= 2 and resp[0] == MSG_ACK
         except socket.timeout:
             return False
+
+    # ─────────────────────────────────────────────────────────────────
+    # Hand (DXL) state feedback
+    # ─────────────────────────────────────────────────────────────────
+    def get_hand_state(self) -> ThemisHandFeedback:
+        """Request and receive hand (DXL) state feedback (blocking)."""
+        self._send(struct.pack('B', MSG_HAND_STATE_REQUEST))
+        try:
+            data = self._recv()
+        except socket.timeout:
+            fb = ThemisHandFeedback()
+            fb.valid = False
+            return fb
+
+        if len(data) < 2 or data[0] != MSG_HAND_STATE_RESPONSE:
+            fb = ThemisHandFeedback()
+            fb.valid = False
+            return fb
+
+        return self._parse_hand_state_response(data[1:])
+
+    def _parse_hand_state_response(self, payload: bytes) -> ThemisHandFeedback:
+        """Parse HAND_STATE_RESPONSE payload into ThemisHandFeedback."""
+        fb = ThemisHandFeedback()
+        arr = np.frombuffer(payload, dtype=np.float64)
+
+        # Expected: 7*3 + 7*3 + 1 = 43 doubles
+        if arr.size < 43:
+            fb.valid = False
+            return fb
+
+        i = 0
+        fb.right_hand_q      = arr[i:i+7].copy(); i += 7
+        fb.right_hand_dq     = arr[i:i+7].copy(); i += 7
+        fb.right_hand_torque = arr[i:i+7].copy(); i += 7
+        fb.left_hand_q       = arr[i:i+7].copy(); i += 7
+        fb.left_hand_dq      = arr[i:i+7].copy(); i += 7
+        fb.left_hand_torque  = arr[i:i+7].copy(); i += 7
+        fb.timestamp         = float(arr[i]); i += 1
+        fb.valid = True
+        return fb
+
+    # ─────────────────────────────────────────────────────────────────
+    # Hand (DXL) joint commands
+    # ─────────────────────────────────────────────────────────────────
+    def send_hand_command(self, side: str,
+                          q: np.ndarray,
+                          dq: Optional[np.ndarray] = None,
+                          u: Optional[np.ndarray] = None,
+                          kp: Optional[np.ndarray] = None,
+                          kd: Optional[np.ndarray] = None):
+        """
+        Send hand joint command (fire-and-forget, no ACK).
+
+        Parameters
+        ----------
+        side : 'right' or 'left'
+        q    : (7,) goal joint positions [rad]
+        dq   : (7,) goal joint velocities, default zeros
+        u    : (7,) feedforward torques, default zeros
+        kp   : (7,) proportional gains
+        kd   : (7,) derivative gains
+        """
+        q  = np.asarray(q, dtype=np.float64).ravel()
+        dq = np.zeros(7, dtype=np.float64) if dq is None else np.asarray(dq, dtype=np.float64).ravel()
+        u  = np.zeros(7, dtype=np.float64) if u is None else np.asarray(u, dtype=np.float64).ravel()
+        kp = np.full(7, 5.0, dtype=np.float64) if kp is None else np.asarray(kp, dtype=np.float64).ravel()
+        kd = np.full(7, 0.5, dtype=np.float64) if kd is None else np.asarray(kd, dtype=np.float64).ravel()
+
+        side_byte = SIDE_RIGHT_HAND if side == 'right' else SIDE_LEFT_HAND
+        payload = (struct.pack('B', side_byte)
+                   + q.tobytes() + dq.tobytes() + u.tobytes()
+                   + kp.tobytes() + kd.tobytes())
+        self._send(struct.pack('B', MSG_HAND_JOINT_CMD) + payload)
 
     # ─────────────────────────────────────────────────────────────────
     # Helpers

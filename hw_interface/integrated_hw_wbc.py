@@ -70,7 +70,8 @@ sys.path.insert(0, PROJECT_DIR)
 
 from real_time_sim.config import PipelineConfig
 from real_time_sim.shared_state import (
-    SharedState, RobotState, RobotFeedback, RetargetingOutput, ArmTrackingData,
+    SharedState, RobotState, RobotFeedback, RetargetingOutput,
+    ArmTrackingData, HandTrackingData,
 )
 from real_time_sim.nodes.body_tracking_node import BodyTrackingNode
 from real_time_sim.nodes.retargeting_node import RetargetingNode
@@ -89,11 +90,34 @@ IDLE_L_HW = np.array([-0.20, -1.40, -1.57, -0.40,  0.00,  0.00, +1.50])
 KP_SOFT = np.full(7, 20.0)
 KD_SOFT = np.full(7,  2.0)
 
-MSG_ARM_JOINT_CMD = 0x10
-MSG_STATE_REQUEST = 0x01
+MSG_ARM_JOINT_CMD  = 0x10
+MSG_HAND_JOINT_CMD = 0x12
+MSG_HEAD_JOINT_CMD = 0x13
+MSG_STATE_REQUEST  = 0x01
 MSG_STATE_RESPONSE = 0x02
 SIDE_RIGHT = 2
 SIDE_LEFT  = 0xFE
+SIDE_RIGHT_HAND = 3
+SIDE_LEFT_HAND  = 0xFD
+SIDE_HEAD = 0
+
+# ── Recorded hand poses (from test_hand_open_close.py) ──────────────
+#  Motor order: [f1_prox, f1_dist, f2_prox, f2_dist, f3_prox, f3_dist, split]
+LEFT_FIST  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -2.6047])
+LEFT_OPEN  = np.array([+1.0937, +0.4065, +1.1075, +0.4817, -0.3421, +0.4541, -2.6108])
+RIGHT_FIST = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
+RIGHT_OPEN = np.array([+1.1735, +0.6872, +1.1827, +0.0353, -0.6703, +0.6489, -2.4743])
+
+KP_HAND = np.full(7, 5.0)
+KD_HAND = np.full(7, 0.5)
+
+# ── Head: 2 motors, chain 0, hold at zero ────────────────────────────
+HEAD_ZERO = np.zeros(2, dtype=np.float64)
+KP_HEAD = np.full(2, 10.0)
+KD_HEAD = np.full(2,  1.0)
+
+# ── Hand smoothing ───────────────────────────────────────────────────
+MAX_HAND_VEL     = 2.0     # rad/s per motor — rate limit on hand cmds
 
 # Shutdown flag
 _shutdown = False
@@ -125,6 +149,35 @@ def _send_both_arms_ff(client, q_r, q_l, kp, kd):
                + q_.tobytes() + dq.tobytes() + u.tobytes()
                + kp_.tobytes() + kd_.tobytes())
         client._send(pkt)
+
+
+def _send_both_hands_ff(client, q_r, q_l, kp, kd):
+    """Fire-and-forget both hand commands — never blocks."""
+    dq = np.zeros(7, dtype=np.float64)
+    u  = np.zeros(7, dtype=np.float64)
+    for side_byte, q in [(SIDE_RIGHT_HAND, q_r), (SIDE_LEFT_HAND, q_l)]:
+        q_  = np.asarray(q, dtype=np.float64).ravel()
+        kp_ = np.asarray(kp, dtype=np.float64).ravel()
+        kd_ = np.asarray(kd, dtype=np.float64).ravel()
+        pkt = (struct.pack('B', MSG_HAND_JOINT_CMD)
+               + struct.pack('B', side_byte)
+               + q_.tobytes() + dq.tobytes() + u.tobytes()
+               + kp_.tobytes() + kd_.tobytes())
+        client._send(pkt)
+
+
+def _send_head_ff(client, q, kp, kd):
+    """Fire-and-forget head command (chain 0, 2 motors) — never blocks."""
+    q_  = np.asarray(q,  dtype=np.float64).ravel()
+    dq  = np.zeros(2, dtype=np.float64)
+    u   = np.zeros(2, dtype=np.float64)
+    kp_ = np.asarray(kp, dtype=np.float64).ravel()
+    kd_ = np.asarray(kd, dtype=np.float64).ravel()
+    pkt = (struct.pack('B', MSG_HEAD_JOINT_CMD)
+           + struct.pack('B', SIDE_HEAD)
+           + q_.tobytes() + dq.tobytes() + u.tobytes()
+           + kp_.tobytes() + kd_.tobytes())
+    client._send(pkt)
 
 
 def _spin_wait(target):
@@ -277,6 +330,11 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
         a = (now - t0) / RAMP
         _send_both_arms_ff(client, lerp(start_r, IDLE_R_HW, a),
                            lerp(start_l, IDLE_L_HW, a), KP_SOFT, KD_SOFT)
+        # Ramp hands to FIST (from current → fist, same alpha)
+        _send_both_hands_ff(client, lerp(RIGHT_OPEN, RIGHT_FIST, a),
+                            lerp(LEFT_OPEN, LEFT_FIST, a), KP_HAND, KD_HAND)
+        # Head to zero
+        _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
         tick += dt
         _spin_wait(tick)
 
@@ -284,6 +342,8 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     t0 = time.perf_counter(); tick = t0
     while time.perf_counter() - t0 < 0.5 and not _shutdown:
         _send_both_arms_ff(client, IDLE_R_HW, IDLE_L_HW, KP_SOFT, KD_SOFT)
+        _send_both_hands_ff(client, RIGHT_FIST, LEFT_FIST, KP_HAND, KD_HAND)
+        _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
         tick += dt; _spin_wait(tick)
 
     if _shutdown:
@@ -294,6 +354,9 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     # ── Phase 2: Tracking loop ───────────────────────────────────────
     last_cmd_r = IDLE_R_HW.copy()
     last_cmd_l = IDLE_L_HW.copy()
+    last_hand_r = RIGHT_FIST.copy()
+    last_hand_l = LEFT_FIST.copy()
+    max_hand_delta = MAX_HAND_VEL * dt  # per-tick hand motor limit
     blend_started = False
     blend_t0 = 0.0
     blend_start_r = IDLE_R_HW.copy()
@@ -350,10 +413,35 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
             cmd_r = last_cmd_r
             cmd_l = last_cmd_l
 
-        # Send
+        # Send arms
         _send_both_arms_ff(client, cmd_r, cmd_l, KP_SOFT, KD_SOFT)
         last_cmd_r = cmd_r.copy()
         last_cmd_l = cmd_l.copy()
+
+        # ── Hand commands (direct lerp + velocity clamp) ──────────────
+        hand_data = shared.get_hand_tracking_data()
+        if hand_data.valid:
+            # NOTE: ZED camera is mirrored (camera-left = user-right)
+            # So tracking's "left_open_close" → command RIGHT hand
+            # and tracking's "right_open_close" → command LEFT hand
+            hand_target_r = lerp(RIGHT_FIST, RIGHT_OPEN, hand_data.left_open_close)
+            hand_target_l = lerp(LEFT_FIST, LEFT_OPEN, hand_data.right_open_close)
+        else:
+            hand_target_r = last_hand_r
+            hand_target_l = last_hand_l
+
+        # Per-motor velocity clamp (prevents sudden jumps)
+        hand_delta_r = np.clip(hand_target_r - last_hand_r, -max_hand_delta, max_hand_delta)
+        hand_delta_l = np.clip(hand_target_l - last_hand_l, -max_hand_delta, max_hand_delta)
+        hand_cmd_r = last_hand_r + hand_delta_r
+        hand_cmd_l = last_hand_l + hand_delta_l
+
+        _send_both_hands_ff(client, hand_cmd_r, hand_cmd_l, KP_HAND, KD_HAND)
+        last_hand_r = hand_cmd_r.copy()
+        last_hand_l = hand_cmd_l.copy()
+
+        # ── Head: hold at zero ───────────────────────────────────────
+        _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
 
         # Also publish robot feedback to SharedState for IK warm-start
         # (use background thread's latest — no blocking)
@@ -388,6 +476,8 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
                 print(f"         Tracking error: R={err_r:.1f}°  L={err_l:.1f}°")
                 print(f"         R cmd: {np.degrees(cmd_r).round(1)}")
                 print(f"         R fb:  {np.degrees(fb_now.right_arm_q).round(1)}")
+            if hand_data.valid:
+                print(f"         Hands: R oc={hand_data.right_open_close:.2f} | L oc={hand_data.left_open_close:.2f}")
 
         tick += dt
         _spin_wait(tick)
@@ -396,6 +486,8 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     print(f"\n[Phase 3] Returning to IDLE over 3.0 s …")
     cur_r = last_cmd_r.copy()
     cur_l = last_cmd_l.copy()
+    cur_hand_r = last_hand_r.copy()
+    cur_hand_l = last_hand_l.copy()
     t0 = time.perf_counter()
     tick = t0
     _shutdown = False  # allow ramp to complete
@@ -404,6 +496,9 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
         a = min((now - t0) / RAMP, 1.0)
         _send_both_arms_ff(client, lerp(cur_r, IDLE_R_HW, a),
                            lerp(cur_l, IDLE_L_HW, a), KP_SOFT, KD_SOFT)
+        _send_both_hands_ff(client, lerp(cur_hand_r, RIGHT_FIST, a),
+                            lerp(cur_hand_l, LEFT_FIST, a), KP_HAND, KD_HAND)
+        _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
         tick += dt
         _spin_wait(tick)
 
@@ -411,9 +506,11 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     t0 = time.perf_counter(); tick = t0
     while time.perf_counter() - t0 < 0.5:
         _send_both_arms_ff(client, IDLE_R_HW, IDLE_L_HW, KP_SOFT, KD_SOFT)
+        _send_both_hands_ff(client, RIGHT_FIST, LEFT_FIST, KP_HAND, KD_HAND)
+        _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
         tick += dt; _spin_wait(tick)
 
-    print("[Phase 3] Arms at IDLE ✓")
+    print("[Phase 3] Arms at IDLE, hands at FIST, head at zero ✓")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -454,7 +551,9 @@ def main():
     print("=" * 72)
     print(f"  Robot:       {args.robot_ip}:{args.port}")
     print(f"  Cmd rate:    {args.rate:.0f} Hz")
-    print(f"  Gains:       kp={args.kp:.1f}  kd={args.kd:.1f}")
+    print(f"  Arm gains:   kp={args.kp:.1f}  kd={args.kd:.1f}")
+    print(f"  Hand gains:  kp=5.0  kd=0.5")
+    print(f"  Head gains:  kp=10.0  kd=1.0")
     print(f"  Blend:       {args.blend_time:.1f} s")
     print(f"  Max vel:     {args.max_vel:.1f} rad/s")
     print(f"  Camera:      {'dummy' if args.no_camera else 'ZED'}")

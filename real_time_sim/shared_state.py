@@ -58,6 +58,34 @@ class ArmTrackingData:
 
 
 @dataclass
+class HandTrackingData:
+    """Container for hand/finger tracking data from ZED.
+
+    Two control signals per hand derived from BODY_38 finger keypoints:
+      open_close_ratio : 0.0 = fist (closed), 1.0 = palm (open)
+          Derived from dist(MIDDLE_4, WRIST).
+      split_ratio      : 0.0 = fingers together, 1.0 = max splay
+          Derived from dist(INDEX_1, MIDDLE_4).
+    """
+    timestamp: float = 0.0
+    valid: bool = False
+    left_open_close: float = 0.0   # 0=fist, 1=open
+    left_split: float = 0.0        # 0=together, 1=spread
+    right_open_close: float = 0.0
+    right_split: float = 0.0
+
+    def copy(self) -> 'HandTrackingData':
+        return HandTrackingData(
+            timestamp=self.timestamp,
+            valid=self.valid,
+            left_open_close=self.left_open_close,
+            left_split=self.left_split,
+            right_open_close=self.right_open_close,
+            right_split=self.right_split,
+        )
+
+
+@dataclass
 class RetargetingOutput:
     """Output from retargeting node: desired joint positions."""
     timestamp: float = 0.0
@@ -147,6 +175,7 @@ class SharedState:
     def __init__(self):
         # Locks for each data type
         self._tracking_lock = threading.Lock()
+        self._hand_tracking_lock = threading.Lock()
         self._retarget_lock = threading.Lock()
         self._feedback_lock = threading.Lock()
         self._fsm_lock = threading.Lock()
@@ -154,6 +183,7 @@ class SharedState:
         
         # Data containers
         self._tracking_data = ArmTrackingData()
+        self._hand_tracking_data = HandTrackingData()
         self._retarget_output = RetargetingOutput()
         self._robot_feedback = RobotFeedback()
         self._fsm_state = RobotState.INIT
@@ -187,7 +217,18 @@ class SharedState:
         """Get tracking data (called by retargeting node)."""
         with self._tracking_lock:
             return self._tracking_data.copy()
-    
+
+    # --- Hand Tracking Data ---
+    def set_hand_tracking_data(self, data: HandTrackingData):
+        """Set hand tracking data (called by tracking node)."""
+        with self._hand_tracking_lock:
+            self._hand_tracking_data = data.copy()
+
+    def get_hand_tracking_data(self) -> HandTrackingData:
+        """Get hand tracking data (called by command loop)."""
+        with self._hand_tracking_lock:
+            return self._hand_tracking_data.copy()
+
     # --- Retargeting Output ---
     def set_retarget_output(self, output: RetargetingOutput):
         """Set retargeting output (called by retargeting node)."""

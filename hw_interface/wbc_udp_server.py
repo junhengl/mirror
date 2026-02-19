@@ -61,17 +61,26 @@ CHAIN_RIGHT_LEG =  1   # +1
 CHAIN_LEFT_LEG  = -1
 CHAIN_RIGHT_ARM =  2   # +2
 CHAIN_LEFT_ARM  = -2
+CHAIN_RIGHT_HAND =  3  # +3  (DXL hand motors)
+CHAIN_LEFT_HAND  = -3
 
 # ── Message types (same wire format as shm_udp_server.py) ───────────
 MSG_STATE_REQUEST     = 0x01
 MSG_STATE_RESPONSE    = 0x02
+MSG_HAND_STATE_REQUEST  = 0x03
+MSG_HAND_STATE_RESPONSE = 0x04
 MSG_ARM_JOINT_CMD     = 0x10
+MSG_HAND_JOINT_CMD    = 0x12
+MSG_HEAD_JOINT_CMD    = 0x13
 MSG_MANIP_REF         = 0x11
 MSG_HEARTBEAT         = 0x20
 MSG_ACK               = 0xFE
 
 SIDE_RIGHT = 2      # +2
 SIDE_LEFT  = 0xFE   # -2 stored as unsigned byte
+SIDE_RIGHT_HAND = 3     # +3
+SIDE_LEFT_HAND  = 0xFD  # -3 stored as unsigned byte
+SIDE_HEAD = 0           # chain 0
 
 
 def pack_state_response() -> bytes:
@@ -226,6 +235,108 @@ def handle_manip_ref(payload: bytes):
         print(f"[wbc-bridge] set_joint_states (left, manip_ref) failed: {e}")
 
 
+def pack_hand_state_response() -> bytes:
+    """
+    Read hand (DXL) joint states via wbc_api and pack a
+    HAND_STATE_RESPONSE datagram.
+
+    Wire format:
+        right_hand_q(7), right_hand_dq(7), right_hand_u(7),
+        left_hand_q(7),  left_hand_dq(7),  left_hand_u(7),
+        timestamp(1)
+        = 43 doubles = 344 bytes
+    """
+    try:
+        rh_q, rh_dq, rh_u = wbc_api.get_joint_states(CHAIN_RIGHT_HAND)
+    except Exception:
+        rh_q = rh_dq = rh_u = np.zeros(7)
+
+    try:
+        lh_q, lh_dq, lh_u = wbc_api.get_joint_states(CHAIN_LEFT_HAND)
+    except Exception:
+        lh_q = lh_dq = lh_u = np.zeros(7)
+
+    buf = struct.pack('B', MSG_HAND_STATE_RESPONSE)
+    buf += np.asarray(rh_q,  dtype=np.float64).tobytes()
+    buf += np.asarray(rh_dq, dtype=np.float64).tobytes()
+    buf += np.asarray(rh_u,  dtype=np.float64).tobytes()
+    buf += np.asarray(lh_q,  dtype=np.float64).tobytes()
+    buf += np.asarray(lh_dq, dtype=np.float64).tobytes()
+    buf += np.asarray(lh_u,  dtype=np.float64).tobytes()
+    buf += np.array([time.time()], dtype=np.float64).tobytes()
+    return buf
+
+
+def handle_hand_joint_cmd(payload: bytes):
+    """
+    Unpack HAND_JOINT_COMMAND and apply via official API:
+
+        wbc_api.set_joint_states(±3, u, q, dq, kp, kd)
+
+    Each hand has 7 DXL motors:
+      [0:1] = finger 1 flex (2 DOF: prox, dist)
+      [2:3] = finger 2 flex (2 DOF: prox, dist)
+      [4:5] = finger 3 flex (2 DOF: prox, dist)
+      [6]   = finger split
+    """
+    side = payload[0]
+    data = np.frombuffer(payload[1:], dtype=np.float64)
+    if data.size != 35:
+        print(f"[wbc-bridge] HAND_JOINT_CMD payload mismatch: got {data.size}, expected 35")
+        return
+
+    q   = data[0:7].copy()
+    dq  = data[7:14].copy()
+    u   = data[14:21].copy()
+    kp  = data[21:28].copy()
+    kd  = data[28:35].copy()
+
+    if side == SIDE_RIGHT_HAND:
+        chain = CHAIN_RIGHT_HAND
+    elif side == SIDE_LEFT_HAND:
+        chain = CHAIN_LEFT_HAND
+    else:
+        print(f"[wbc-bridge] Unknown hand side byte: 0x{side:02X}")
+        return
+
+    try:
+        wbc_api.set_joint_states(chain, u, q, dq, kp, kd)
+    except Exception as e:
+        print(f"[wbc-bridge] set_joint_states (hand) failed: {e}")
+
+
+def handle_head_joint_cmd(payload: bytes):
+    """
+    Unpack HEAD_JOINT_COMMAND and apply via official API:
+
+        wbc_api.set_joint_states(0, u, q, dq, kp, kd)
+
+    Head is chain 0 with 2 motors.
+    Wire format: side_byte(1) + [q(2), dq(2), u(2), kp(2), kd(2)] as float64
+                 = 1 + 10*8 = 81 bytes payload
+    """
+    side = payload[0]
+    data = np.frombuffer(payload[1:], dtype=np.float64)
+    if data.size != 10:
+        print(f"[wbc-bridge] HEAD_JOINT_CMD payload mismatch: got {data.size}, expected 10")
+        return
+
+    q   = data[0:2].copy()
+    dq  = data[2:4].copy()
+    u   = data[4:6].copy()
+    kp  = data[6:8].copy()
+    kd  = data[8:10].copy()
+
+    if side != SIDE_HEAD:
+        print(f"[wbc-bridge] Unknown head side byte: 0x{side:02X} (expected 0x00)")
+        return
+
+    try:
+        wbc_api.set_joint_states(CHAIN_HEAD, u, q, dq, kp, kd)
+    except Exception as e:
+        print(f"[wbc-bridge] set_joint_states (head) failed: {e}")
+
+
 def run_server(host: str, port: int, log_enabled: bool = False):
     """Main server loop."""
     print("=" * 60)
@@ -352,6 +463,19 @@ def run_server(host: str, port: int, log_enabled: bool = False):
             if msg_type == MSG_STATE_REQUEST:
                 resp = pack_state_response()
                 sock.sendto(resp, addr)
+
+            elif msg_type == MSG_HAND_STATE_REQUEST:
+                resp = pack_hand_state_response()
+                sock.sendto(resp, addr)
+
+            elif msg_type == MSG_HAND_JOINT_CMD:
+                handle_hand_joint_cmd(payload)
+                # Fire-and-forget — no ACK (same as arm cmds)
+                cmd_count += 1
+
+            elif msg_type == MSG_HEAD_JOINT_CMD:
+                handle_head_joint_cmd(payload)
+                cmd_count += 1
 
             elif msg_type == MSG_ARM_JOINT_CMD:
                 if log_enabled:
