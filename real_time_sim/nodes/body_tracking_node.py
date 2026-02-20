@@ -120,6 +120,15 @@ class BodyTrackingNode:
         self.last_stats_time = time.time()
         self.frame_count = 0
         
+        # --- Single-person tracking lock ---
+        # Lock onto the first person detected; ignore all others.
+        # If the tracked person is lost, freeze output until they reappear.
+        self._tracked_body_id: Optional[int] = None           # ZED tracking ID we're locked onto
+        self._tracked_body_lost_time: Optional[float] = None  # When we first lost the tracked person
+        self._reacquire_timeout: float = 5.0                  # Seconds before re-locking to a new single person
+        self._last_valid_arm_data: Optional[ArmTrackingData] = None
+        self._last_valid_hand_data: Optional[HandTrackingData] = None
+
     def start(self):
         """Start tracking thread."""
         self.running = True
@@ -200,12 +209,16 @@ class BodyTrackingNode:
         
         while self.running and not self.shared.is_shutdown_requested():
             loop_start = time.time()
+            _t0 = time.perf_counter()
             if self.zed.grab() == sl.ERROR_CODE.SUCCESS:
+                _t1 = time.perf_counter()
+
                 # Get camera image
                 self.zed.retrieve_image(image, sl.VIEW.LEFT, sl.MEM.CPU, display_resolution)
                 
                 # Get bodies
                 self.zed.retrieve_bodies(bodies, body_runtime)
+                _t2 = time.perf_counter()
                 
                 # Display with skeleton overlay
                 image_ocv = image.get_data()
@@ -213,16 +226,35 @@ class BodyTrackingNode:
                     image_ocv, image_scale, bodies.body_list, True, sl.BODY_FORMAT.BODY_38
                 )
                 self.cv2.imshow("ZED Body Tracking", image_ocv)
+                _t3 = time.perf_counter()
+                
+                # Find the tracked person (single-person lock)
+                tracked_body = self._find_tracked_body(bodies)
                 
                 # Extract arm data
-                arm_data = self._extract_arm_data(bodies)
+                arm_data = self._extract_arm_data(tracked_body)
                 
                 # Extract hand/finger data
-                hand_data = self._extract_hand_data(bodies)
+                hand_data = self._extract_hand_data(tracked_body)
+                _t4 = time.perf_counter()
+                
+                # Tag capture timestamp and cache for freeze
+                # (loop_start ≈ sensor exposure time, best wall-clock approximation)
+                # Always set timestamp so we can track age of data
+                arm_data.timestamp = loop_start
+                if tracked_body is not None and arm_data.valid:
+                    self._last_valid_arm_data = arm_data.copy()
                 
                 # Publish to shared state
                 self.shared.set_tracking_data(arm_data)
                 self.shared.set_hand_tracking_data(hand_data)
+                
+                # Publish per-stage latency (seconds)
+                self.shared.set_loop_duration('lat_zed_grab', _t1 - _t0)
+                self.shared.set_loop_duration('lat_zed_retrieve', _t2 - _t1)
+                self.shared.set_loop_duration('lat_display', _t3 - _t2)
+                self.shared.set_loop_duration('lat_tracking_extract', _t4 - _t3)
+                self.shared.set_loop_duration('lat_tracking_total', _t4 - _t0)
                 
                 # Update timing stats
                 self.frame_count += 1
@@ -230,7 +262,8 @@ class BodyTrackingNode:
                     hz = self.frame_count / (time.time() - self.last_stats_time)
                     self.shared.update_timing('tracking', hz)
                     # Debug: print arm data validity and confidence
-                    print(f"[Tracking] valid={arm_data.valid}, L_conf={arm_data.left_confidence:.1f}, R_conf={arm_data.right_confidence:.1f}")
+                    frozen = self._tracked_body_id is not None and self._tracked_body_lost_time is not None
+                    print(f"[Tracking] ID={self._tracked_body_id} frozen={frozen} valid={arm_data.valid}, L_conf={arm_data.left_confidence:.1f}, R_conf={arm_data.right_confidence:.1f}")
                     self.frame_count = 0
                     self.last_stats_time = time.time()
                 
@@ -249,14 +282,71 @@ class BodyTrackingNode:
         image.free(sl.MEM.CPU)
         self.cv2.destroyAllWindows()
     
-    def _extract_arm_data(self, bodies) -> ArmTrackingData:
-        """Extract arm tracking data from ZED bodies."""
+    def _find_tracked_body(self, bodies):
+        """Find the single person we're tracking by ZED tracking ID.
+
+        - Locks onto the first person detected.
+        - Subsequent frames: only returns the body with the locked ID.
+        - If the tracked person disappears, returns None (caller should freeze).
+        - After a timeout with only 1 person visible, re-locks to that person.
+        """
+        body_list = bodies.body_list
+
+        if len(body_list) == 0:
+            # Nobody visible — mark loss time if we were tracking someone
+            if self._tracked_body_id is not None and self._tracked_body_lost_time is None:
+                self._tracked_body_lost_time = time.time()
+                print(f"[Tracking] Lost person ID={self._tracked_body_id} (nobody visible), freezing...")
+            return None
+
+        # First-time lock: pick the first person that appears
+        if self._tracked_body_id is None:
+            self._tracked_body_id = int(body_list[0].id)
+            self._tracked_body_lost_time = None
+            print(f"[Tracking] Locked onto person ID={self._tracked_body_id}")
+            return body_list[0]
+
+        # Look for the body matching our locked ID
+        for body in body_list:
+            if int(body.id) == self._tracked_body_id:
+                # Found our person — clear any loss timer
+                if self._tracked_body_lost_time is not None:
+                    elapsed = time.time() - self._tracked_body_lost_time
+                    print(f"[Tracking] Re-acquired person ID={self._tracked_body_id} after {elapsed:.1f}s")
+                self._tracked_body_lost_time = None
+                return body
+
+        # Tracked person not in this frame
+        if self._tracked_body_lost_time is None:
+            self._tracked_body_lost_time = time.time()
+            print(f"[Tracking] Lost person ID={self._tracked_body_id} among {len(body_list)} other bodies, freezing...")
+
+        # After timeout, if exactly 1 person is visible, re-lock to them
+        # (likely the same operator who briefly left and returned with a new ID)
+        elapsed = time.time() - self._tracked_body_lost_time
+        if elapsed > self._reacquire_timeout and len(body_list) == 1:
+            old_id = self._tracked_body_id
+            self._tracked_body_id = int(body_list[0].id)
+            self._tracked_body_lost_time = None
+            # Reset position filters to avoid large jumps from stale state
+            for f in self.filters.values():
+                f.reset()
+            print(f"[Tracking] Re-locked from ID={old_id} to ID={self._tracked_body_id} after {elapsed:.1f}s timeout")
+            return body_list[0]
+
+        return None  # Stay frozen
+
+    def _extract_arm_data(self, body) -> ArmTrackingData:
+        """Extract arm tracking data from a single tracked body (or None if lost)."""
         sl = self.sl
-        
-        if len(bodies.body_list) == 0:
+
+        if body is None:
+            # Person lost — freeze: return last valid data
+            # (preserve original capture timestamp for latency tracking)
+            if self._last_valid_arm_data is not None:
+                return self._last_valid_arm_data.copy()
             return ArmTrackingData(timestamp=time.time(), valid=False)
-        
-        body = bodies.body_list[0]
+
         kp = body.keypoint
         conf = body.keypoint_confidence
         
@@ -325,21 +415,20 @@ class BodyTrackingNode:
             right_confidence=min(_safe_conf(15), _safe_conf(17)),
         )
     
-    def _extract_hand_data(self, bodies) -> HandTrackingData:
+    def _extract_hand_data(self, body) -> HandTrackingData:
         """Hand open/close from dist(middle_fingertip, wrist).
 
         No filtering here — the 1 kHz command loop applies a per-motor
         velocity clamp which gives smooth hardware motion.
         Invalid frames hold the previous value.
         """
-        if len(bodies.body_list) == 0:
+        if body is None:
             return HandTrackingData(
                 timestamp=time.time(), valid=False,
                 left_open_close=self._last_l_oc,
                 right_open_close=self._last_r_oc,
             )
 
-        body = bodies.body_list[0]
         kp = body.keypoint
         conf = body.keypoint_confidence
 
@@ -355,8 +444,8 @@ class BodyTrackingNode:
         HAND_CONF = 5.0
 
         # Distance thresholds (metres) — tune to your operator
-        D_CLOSED = 0.14
-        D_OPEN   = 0.05
+        D_CLOSED = 0.1
+        D_OPEN   = 0.06
 
         def _ratio(d):
             return float(np.clip((d - D_CLOSED) / (D_OPEN - D_CLOSED), 0.0, 1.0))
@@ -379,8 +468,8 @@ class BodyTrackingNode:
         if self.frame_count == 1:
             l_dist = abs(np.linalg.norm(l_w) - np.linalg.norm(l_m)) if (lw_ok and lm_ok) else 0.0
             r_dist = abs(np.linalg.norm(r_w) - np.linalg.norm(r_m)) if (rw_ok and rm_ok) else 0.0
-            print(f"[Hand] LEFT: wrist={l_w} middle={l_m} dist={l_dist:.3f}m oc={self._last_l_oc:.2f} | "
-                  f"RIGHT: wrist={r_w} middle={r_m} dist={r_dist:.3f}m oc={self._last_r_oc:.2f}")
+            # print(f"[Hand] LEFT: wrist={l_w} middle={l_m} dist={l_dist:.3f}m oc={self._last_l_oc:.2f} | "
+            #       f"RIGHT: wrist={r_w} middle={r_m} dist={r_dist:.3f}m oc={self._last_r_oc:.2f}")
 
         return HandTrackingData(
             timestamp=time.time(),

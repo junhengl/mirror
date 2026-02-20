@@ -75,7 +75,7 @@ class TrackingConfig:
     min_confidence: float = 30.0
     
     # Filter parameters
-    filter_alpha: float = 0.8
+    filter_alpha: float = 0.9
     jump_threshold: float = 0.12  # meters
 
 

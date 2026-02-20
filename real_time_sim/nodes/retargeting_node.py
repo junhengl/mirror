@@ -132,6 +132,7 @@ class RetargetingNode:
             # Always run retargeting when we have tracking data
             # (don't wait for FSM to be in TRACKING - that creates circular dependency)
             tracking = self.shared.get_tracking_data()
+            t_tracking_read = time.time()
             
             # Get robot feedback for warm start
             feedback = self.shared.get_robot_feedback()
@@ -140,8 +141,18 @@ class RetargetingNode:
             if tracking.valid or self.last_valid_tracking is not None:
                 output = self._solve_ik(tracking, feedback)
                 
+                # Propagate capture timestamp for end-to-end latency tracking
+                output.source_capture_ts = tracking.timestamp
+                
                 # Publish output
                 self.shared.set_retarget_output(output)
+                
+                # Publish latency metrics
+                if tracking.timestamp > 0:
+                    self.shared.set_loop_duration(
+                        'lat_tracking_data_age', t_tracking_read - tracking.timestamp)
+                self.shared.set_loop_duration(
+                    'lat_retarget_total', time.perf_counter() - loop_start)
             
             # Update timing stats
             self.iteration_count += 1
@@ -368,7 +379,7 @@ class RetargetingNode:
             # # q_des [29] = np.pi/6
 
             ik_time = time.perf_counter() - ik_start
-            self.shared.update_timing('ik_solve', ik_time)
+            self.shared.set_loop_duration('lat_ik_solve', ik_time)
             # print(f"[Retargeting] IK solve time: {ik_time*1000:.2f} ms")
 
             # Check for NaN/Inf after IK solve

@@ -183,7 +183,10 @@ class HardwareSenderNode:
 
             try:
                 # 1. Read robot feedback and publish to shared state
+                _t_fb = time.perf_counter()
                 self._read_feedback()
+                self.shared.set_loop_duration(
+                    'lat_udp_feedback_rtt', time.perf_counter() - _t_fb)
 
                 # 2. Read retargeting output and send to robot
                 self._send_commands()
@@ -241,6 +244,15 @@ class HardwareSenderNode:
     def _send_commands(self):
         """Read retarget output and send to robot."""
         retarget = self.shared.get_retarget_output()
+        
+        # Track end-to-end pipeline latency
+        if retarget.valid and retarget.source_capture_ts > 0:
+            _t_now = time.time()
+            self.shared.set_loop_duration(
+                'lat_retarget_output_age', _t_now - retarget.timestamp)
+            self.shared.set_loop_duration(
+                'lat_total_capture_to_cmd', _t_now - retarget.source_capture_ts)
+        
         fsm_state = self.shared.get_fsm_state()
 
         if not retarget.valid:
@@ -458,6 +470,32 @@ def main():
                       f"Retarget: {stats.get('retarget_hz', 0):.0f} Hz | "
                       f"HW Sender: {stats.get('control_hz', 0):.0f} Hz | "
                       f"IK valid: {retarget_out.valid}")
+
+                # Latency breakdown
+                lat = shared.get_loop_durations()
+                zed_grab = lat.get('lat_zed_grab_loop_s', 0) * 1000
+                zed_retr = lat.get('lat_zed_retrieve_loop_s', 0) * 1000
+                disp     = lat.get('lat_display_loop_s', 0) * 1000
+                trk_ext  = lat.get('lat_tracking_extract_loop_s', 0) * 1000
+                trk_tot  = lat.get('lat_tracking_total_loop_s', 0) * 1000
+                data_age = lat.get('lat_tracking_data_age_loop_s', 0) * 1000
+                ik_solve = lat.get('lat_ik_solve_loop_s', 0) * 1000
+                rt_tot   = lat.get('lat_retarget_total_loop_s', 0) * 1000
+                rt_age   = lat.get('lat_retarget_output_age_loop_s', 0) * 1000
+                udp_rtt  = lat.get('lat_udp_feedback_rtt_loop_s', 0) * 1000
+                e2e      = lat.get('lat_total_capture_to_cmd_loop_s', 0) * 1000
+                if trk_tot > 0 or data_age > 0 or ik_solve > 0:
+                    print(f"[Latency] ZED grab: {zed_grab:.1f}ms | "
+                          f"body detect: {zed_retr:.1f}ms | "
+                          f"display: {disp:.1f}ms | "
+                          f"extract: {trk_ext:.1f}ms | "
+                          f"tracking total: {trk_tot:.1f}ms")
+                    print(f"          data age\u2192retarget: {data_age:.1f}ms | "
+                          f"IK solve: {ik_solve:.1f}ms | "
+                          f"retarget loop: {rt_tot:.1f}ms | "
+                          f"output age\u2192hw: {rt_age:.1f}ms")
+                    print(f"          UDP RTT: {udp_rtt:.1f}ms | "
+                          f"END-TO-END (capture\u2192command): {e2e:.1f}ms")
 
                 if hw_fb.valid and retarget_out.valid:
                     # Show tracking error (desired vs actual)

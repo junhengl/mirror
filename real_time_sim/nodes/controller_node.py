@@ -81,6 +81,15 @@ class ControllerNode:
             
             # Get desired velocities from retargeting output (if in tracking mode)
             retarget = self.shared.get_retarget_output()
+            
+            # Track end-to-end pipeline latency
+            if retarget.valid and retarget.source_capture_ts > 0:
+                _t_now = time.time()
+                self.shared.set_loop_duration(
+                    'lat_retarget_output_age', _t_now - retarget.timestamp)
+                self.shared.set_loop_duration(
+                    'lat_total_capture_to_cmd', _t_now - retarget.source_capture_ts)
+            
             if retarget.valid and self.fsm.get_state() == RobotState.TRACKING:
                 dq_des = retarget.dq_des
             else:

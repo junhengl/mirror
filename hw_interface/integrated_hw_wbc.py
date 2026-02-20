@@ -79,6 +79,7 @@ from real_time_sim.joint_mapping import JointMapping
 
 from hw_interface.themis_udp_client import ThemisUDPClient, ThemisStateFeedback
 from hw_interface.hw_visualizer import HardwareVisualizer
+from hw_interface.experiment_logger import ExperimentLogger
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -87,8 +88,8 @@ from hw_interface.hw_visualizer import HardwareVisualizer
 IDLE_R_HW = np.array([-0.20, +1.40, +1.57, +0.40,  0.00,  0.00, -1.50])
 IDLE_L_HW = np.array([-0.20, -1.40, -1.57, -0.40,  0.00,  0.00, +1.50])
 
-KP_SOFT = np.full(7, 20.0)
-KD_SOFT = np.full(7,  2.0)
+KP_SOFT = np.full(7, 100.0)
+KD_SOFT = np.full(7,  3.0)
 
 MSG_ARM_JOINT_CMD  = 0x10
 MSG_HAND_JOINT_CMD = 0x12
@@ -104,7 +105,7 @@ SIDE_HEAD = 0
 # ── Recorded hand poses (from test_hand_open_close.py) ──────────────
 #  Motor order: [f1_prox, f1_dist, f2_prox, f2_dist, f3_prox, f3_dist, split]
 LEFT_FIST  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -2.6047])
-LEFT_OPEN  = np.array([+1.0937, +0.4065, +1.1075, +0.4817, -0.3421, +0.4541, -2.6108])
+LEFT_OPEN  = np.array([+1.0937, +0.2065, +1.1075, +0.2817, -0.3421, +0.2541, -2.6108])
 RIGHT_FIST = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
 RIGHT_OPEN = np.array([+1.1735, +0.6872, +1.1827, +0.0353, -0.6703, +0.6489, -2.4743])
 
@@ -295,7 +296,8 @@ class DryRunClient:
 # ═══════════════════════════════════════════════════════════════════════
 
 def run_pipeline(client, shared, config, joint_mapping, fb_thread,
-                 rate_hz=1000.0, blend_time=3.0, max_delta_per_s=2.0):
+                 rate_hz=1000.0, blend_time=3.0, max_delta_per_s=2.0,
+                 log_rate_hz=500.0):
     """
     1 kHz command loop that reads retargeting output and sends to robot.
 
@@ -308,6 +310,15 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     global _shutdown
     dt = 1.0 / rate_hz
     max_delta = max_delta_per_s * dt  # rad per tick
+
+    # ── Experiment data logger ────────────────────────────────────────
+    logger = None
+    if log_rate_hz > 0:
+        logger = ExperimentLogger(
+            log_rate_hz=log_rate_hz, cmd_rate_hz=rate_hz,
+            max_duration_s=300.0,
+            save_dir=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        )
 
     # ── Phase 1: Ramp to IDLE ────────────────────────────────────────
     print(f"\n[Phase 1] Ramping to IDLE over 3.0 s …")
@@ -375,6 +386,14 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
 
         # Read latest retargeting output (non-blocking, from SharedState)
         retarget = shared.get_retarget_output()
+        
+        # Measure end-to-end pipeline latency
+        if retarget.valid and retarget.source_capture_ts > 0:
+            _t_now = time.time()
+            shared.set_loop_duration(
+                'lat_retarget_output_age', _t_now - retarget.timestamp)
+            shared.set_loop_duration(
+                'lat_total_capture_to_cmd', _t_now - retarget.source_capture_ts)
 
         if retarget.valid:
             tracking_count += 1
@@ -460,6 +479,16 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
             robot_fb.base_pos = hw_fb.base_position.copy() if hasattr(hw_fb, 'base_position') else np.zeros(3)
             shared.set_robot_feedback(robot_fb)
 
+        # ── Log experiment data (decimated to log_rate_hz) ───────────
+        if logger is not None:
+            logger.log(
+                retarget=retarget,
+                cmd_r=cmd_r, cmd_l=cmd_l,
+                fb=hw_fb,
+                latencies=shared.get_loop_durations(),
+                hand_data=hand_data,
+            )
+
         # Status print every 2 s
         if now - last_print >= 2.0:
             last_print = now
@@ -470,17 +499,45 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
                   f"Cmd loop: {step/(now - tick + step*dt):.0f} Hz | "
                   f"IK valid: {retarget.valid} | "
                   f"frames: {tracking_count}")
-            if fb_now.valid and retarget.valid:
-                err_r = np.degrees(np.linalg.norm(fb_now.right_arm_q - cmd_r))
-                err_l = np.degrees(np.linalg.norm(fb_now.left_arm_q  - cmd_l))
-                print(f"         Tracking error: R={err_r:.1f}°  L={err_l:.1f}°")
-                print(f"         R cmd: {np.degrees(cmd_r).round(1)}")
-                print(f"         R fb:  {np.degrees(fb_now.right_arm_q).round(1)}")
-            if hand_data.valid:
-                print(f"         Hands: R oc={hand_data.right_open_close:.2f} | L oc={hand_data.left_open_close:.2f}")
+            
+            # Latency breakdown
+            lat = shared.get_loop_durations()
+            zed_grab = lat.get('lat_zed_grab_loop_s', 0) * 1000
+            zed_retr = lat.get('lat_zed_retrieve_loop_s', 0) * 1000
+            disp     = lat.get('lat_display_loop_s', 0) * 1000
+            trk_ext  = lat.get('lat_tracking_extract_loop_s', 0) * 1000
+            trk_tot  = lat.get('lat_tracking_total_loop_s', 0) * 1000
+            data_age = lat.get('lat_tracking_data_age_loop_s', 0) * 1000
+            ik_solve = lat.get('lat_ik_solve_loop_s', 0) * 1000
+            rt_tot   = lat.get('lat_retarget_total_loop_s', 0) * 1000
+            rt_age   = lat.get('lat_retarget_output_age_loop_s', 0) * 1000
+            e2e      = lat.get('lat_total_capture_to_cmd_loop_s', 0) * 1000
+            if trk_tot > 0 or data_age > 0 or ik_solve > 0:
+                print(f"[Latency] ZED grab: {zed_grab:.1f}ms | "
+                      f"body detect: {zed_retr:.1f}ms | "
+                      f"display: {disp:.1f}ms | "
+                      f"extract: {trk_ext:.1f}ms | "
+                      f"tracking total: {trk_tot:.1f}ms")
+                print(f"          data age→retarget: {data_age:.1f}ms | "
+                      f"IK solve: {ik_solve:.1f}ms | "
+                      f"retarget loop: {rt_tot:.1f}ms | "
+                      f"output age→hw: {rt_age:.1f}ms")
+                print(f"          END-TO-END (capture→command): {e2e:.1f}ms")
+            # if fb_now.valid and retarget.valid:
+            #     err_r = np.degrees(np.linalg.norm(fb_now.right_arm_q - cmd_r))
+            #     err_l = np.degrees(np.linalg.norm(fb_now.left_arm_q  - cmd_l))
+            #     print(f"         Tracking error: R={err_r:.1f}°  L={err_l:.1f}°")
+            #     print(f"         R cmd: {np.degrees(cmd_r).round(1)}")
+            #     print(f"         R fb:  {np.degrees(fb_now.right_arm_q).round(1)}")
+            # if hand_data.valid:
+            #     print(f"         Hands: R oc={hand_data.right_open_close:.2f} | L oc={hand_data.left_open_close:.2f}")
 
         tick += dt
         _spin_wait(tick)
+
+    # ── Save experiment log ───────────────────────────────────────────
+    if logger is not None:
+        logger.save()
 
     # ── Phase 3: Ramp back to IDLE ───────────────────────────────────
     print(f"\n[Phase 3] Returning to IDLE over 3.0 s …")
@@ -538,6 +595,8 @@ def main():
                         help="Robot height for IK (default: 1.3 m)")
     parser.add_argument("--no-viz", action="store_true",
                         help="Disable MuJoCo visualization window")
+    parser.add_argument("--log-rate", type=float, default=500.0,
+                        help="Experiment logging rate in Hz (default: 500)")
     args = parser.parse_args()
 
     # Gains
@@ -559,6 +618,7 @@ def main():
     print(f"  Camera:      {'dummy' if args.no_camera else 'ZED'}")
     print(f"  Dry-run:     {args.dry_run}")
     print(f"  Visualizer:  {'OFF' if args.no_viz else 'ON'}")
+    print(f"  Log rate:    {args.log_rate:.0f} Hz")
     print("=" * 72)
 
     # ── Config ───────────────────────────────────────────────────────
@@ -629,6 +689,7 @@ def main():
             rate_hz=args.rate,
             blend_time=args.blend_time,
             max_delta_per_s=args.max_vel,
+            log_rate_hz=args.log_rate,
         )
 
     except Exception as e:

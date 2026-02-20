@@ -45,12 +45,36 @@ def print_banner():
 
 
 def print_timing_stats(shared: SharedState):
-    """Print timing statistics."""
+    """Print timing statistics and pipeline latency breakdown."""
     stats = shared.get_timing_stats()
     print(f"\n[Timing] Sim: {stats['sim_hz']:.0f}Hz | "
           f"Control: {stats['control_hz']:.0f}Hz | "
           f"Retarget: {stats['retarget_hz']:.0f}Hz | "
           f"Tracking: {stats['tracking_hz']:.0f}Hz")
+    
+    # Latency breakdown
+    lat = shared.get_loop_durations()
+    zed_grab = lat.get('lat_zed_grab_loop_s', 0) * 1000
+    zed_retr = lat.get('lat_zed_retrieve_loop_s', 0) * 1000
+    disp     = lat.get('lat_display_loop_s', 0) * 1000
+    trk_ext  = lat.get('lat_tracking_extract_loop_s', 0) * 1000
+    trk_tot  = lat.get('lat_tracking_total_loop_s', 0) * 1000
+    data_age = lat.get('lat_tracking_data_age_loop_s', 0) * 1000
+    ik_solve = lat.get('lat_ik_solve_loop_s', 0) * 1000
+    rt_tot   = lat.get('lat_retarget_total_loop_s', 0) * 1000
+    rt_age   = lat.get('lat_retarget_output_age_loop_s', 0) * 1000
+    e2e      = lat.get('lat_total_capture_to_cmd_loop_s', 0) * 1000
+    if trk_tot > 0 or data_age > 0 or ik_solve > 0:
+        print(f"[Latency] ZED grab: {zed_grab:.1f}ms | "
+              f"body detect: {zed_retr:.1f}ms | "
+              f"display: {disp:.1f}ms | "
+              f"extract: {trk_ext:.1f}ms | "
+              f"tracking total: {trk_tot:.1f}ms")
+        print(f"          data age\u2192retarget: {data_age:.1f}ms | "
+              f"IK solve: {ik_solve:.1f}ms | "
+              f"retarget loop: {rt_tot:.1f}ms | "
+              f"output age\u2192ctrl: {rt_age:.1f}ms")
+        print(f"          END-TO-END (capture\u2192command): {e2e:.1f}ms")
 
 
 def main():

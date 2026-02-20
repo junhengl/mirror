@@ -93,6 +93,9 @@ class RetargetingOutput:
     q_des: np.ndarray = field(default_factory=lambda: np.zeros(28, dtype=np.float64))  # Desired joint angles
     dq_des: np.ndarray = field(default_factory=lambda: np.zeros(28, dtype=np.float64))  # Desired joint velocities
     
+    # Source capture timestamp (propagated from body tracking for end-to-end latency)
+    source_capture_ts: float = 0.0
+    
     # Task space targets for visualization (desired)
     hand_l_des: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
     hand_r_des: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
@@ -116,6 +119,7 @@ class RetargetingOutput:
             valid=self.valid,
             q_des=self.q_des.copy(),
             dq_des=self.dq_des.copy(),
+            source_capture_ts=self.source_capture_ts,
             hand_l_des=self.hand_l_des.copy(),
             hand_r_des=self.hand_r_des.copy(),
             elbow_l_des=self.elbow_l_des.copy(),
