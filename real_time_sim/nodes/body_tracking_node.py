@@ -10,7 +10,7 @@ import time
 import threading
 from typing import Optional
 
-from ..shared_state import SharedState, ArmTrackingData, HandTrackingData
+from ..shared_state import SharedState, ArmTrackingData, HandTrackingData, LocomotionCommand
 from ..config import TrackingConfig, PipelineConfig
 
 
@@ -111,6 +111,19 @@ class BodyTrackingNode:
         self._last_l_oc = 0.0
         self._last_r_oc = 0.0
 
+        # --- Locomotion estimation state ---
+        self._pelvis_filter = PositionFilter(alpha=0.2, jump_threshold=0.3)
+        self._prev_pelvis_pos: Optional[np.ndarray] = None
+        self._prev_pelvis_time: float = 0.0
+        self._pelvis_vel_filtered = np.zeros(3, dtype=np.float64)  # smoothed velocity
+        # Pitch compensation: scale down pitch + add offset to counteract backward lean
+        self._pitch_scale = 0.75       # reduce pitch magnitude
+        self._pitch_offset = +0.08    # offset (rad) to compensate for startup backward lean
+        # Velocity filtering
+        self._loco_vel_alpha = 0.10   # velocity EMA smoothing factor (tighter filtering)
+        self._loco_deadzone = 0.10    # m/s — below this → standing (doubled from 0.05)
+        self._loco_max_vel = 0.5      # m/s — clamp magnitude
+
         # Thread state
         self.running = False
         self.thread: Optional[threading.Thread] = None
@@ -158,11 +171,21 @@ class BodyTrackingNode:
         # Initialize ZED
         self.zed = sl.Camera()
         init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD720
-        init_params.camera_fps = 60
+        
+        # Camera resolution from config (fast mode uses VGA for lower latency)
+        _res_map = {
+            "HD2K":   sl.RESOLUTION.HD2K,
+            "HD1080": sl.RESOLUTION.HD1080,
+            "HD720":  sl.RESOLUTION.HD720,
+            "VGA":    sl.RESOLUTION.VGA,
+        }
+        init_params.camera_resolution = _res_map.get(
+            self.track_config.camera_resolution, sl.RESOLUTION.HD720)
+        init_params.camera_fps = 60 if self.track_config.camera_resolution != "VGA" else 100
         init_params.depth_mode = sl.DEPTH_MODE.ULTRA
         init_params.coordinate_units = sl.UNIT.METER
         init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+        print(f"[Tracking] Camera resolution: {self.track_config.camera_resolution}  FPS: {init_params.camera_fps}")
         
         status = self.zed.open(init_params)
         if status != sl.ERROR_CODE.SUCCESS:
@@ -179,7 +202,15 @@ class BodyTrackingNode:
         body_params.enable_tracking = True
         body_params.enable_body_fitting = True
         body_params.body_format = sl.BODY_FORMAT.BODY_38
-        body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
+        # Body tracking model from config (FAST = lower latency, ACCURATE = better quality)
+        _model_map = {
+            "ACCURATE": sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE,
+            "FAST":     sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST,
+        }
+        body_params.detection_model = _model_map.get(
+            self.track_config.body_tracking_model,
+            sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE)
+        print(f"[Tracking] Body tracking model: {self.track_config.body_tracking_model}")
         
         status = self.zed.enable_body_tracking(body_params)
         if status != sl.ERROR_CODE.SUCCESS:
@@ -193,19 +224,26 @@ class BodyTrackingNode:
         body_runtime = sl.BodyTrackingRuntimeParameters()
         body_runtime.detection_confidence_threshold = int(self.track_config.min_confidence)
         
-        # Display setup
-        camera_info = self.zed.get_camera_information()
-        display_resolution = sl.Resolution(
-            min(camera_info.camera_configuration.resolution.width, 1280),
-            min(camera_info.camera_configuration.resolution.height, 720)
-        )
-        image_scale = [
-            display_resolution.width / camera_info.camera_configuration.resolution.width,
-            display_resolution.height / camera_info.camera_configuration.resolution.height
-        ]
+        # Display setup (skip if display_skeleton is disabled for lower latency)
+        _show_display = self.track_config.display_skeleton
+        display_resolution = None
+        image_scale = None
+        image = None
+        if _show_display:
+            camera_info = self.zed.get_camera_information()
+            display_resolution = sl.Resolution(
+                min(camera_info.camera_configuration.resolution.width, 1280),
+                min(camera_info.camera_configuration.resolution.height, 720)
+            )
+            image_scale = [
+                display_resolution.width / camera_info.camera_configuration.resolution.width,
+                display_resolution.height / camera_info.camera_configuration.resolution.height
+            ]
+            image = sl.Mat()
+        else:
+            print("[Tracking] Skeleton display DISABLED (fast mode)")
         
         bodies = sl.Bodies()
-        image = sl.Mat()
         
         while self.running and not self.shared.is_shutdown_requested():
             loop_start = time.time()
@@ -213,19 +251,18 @@ class BodyTrackingNode:
             if self.zed.grab() == sl.ERROR_CODE.SUCCESS:
                 _t1 = time.perf_counter()
 
-                # Get camera image
-                self.zed.retrieve_image(image, sl.VIEW.LEFT, sl.MEM.CPU, display_resolution)
-                
                 # Get bodies
                 self.zed.retrieve_bodies(bodies, body_runtime)
                 _t2 = time.perf_counter()
                 
-                # Display with skeleton overlay
-                image_ocv = image.get_data()
-                self.cv_viewer.render_2D(
-                    image_ocv, image_scale, bodies.body_list, True, sl.BODY_FORMAT.BODY_38
-                )
-                self.cv2.imshow("ZED Body Tracking", image_ocv)
+                # Display with skeleton overlay (skip if disabled)
+                if _show_display:
+                    self.zed.retrieve_image(image, sl.VIEW.LEFT, sl.MEM.CPU, display_resolution)
+                    image_ocv = image.get_data()
+                    self.cv_viewer.render_2D(
+                        image_ocv, image_scale, bodies.body_list, True, sl.BODY_FORMAT.BODY_38
+                    )
+                    self.cv2.imshow("ZED Body Tracking", image_ocv)
                 _t3 = time.perf_counter()
                 
                 # Find the tracked person (single-person lock)
@@ -236,6 +273,9 @@ class BodyTrackingNode:
                 
                 # Extract hand/finger data
                 hand_data = self._extract_hand_data(tracked_body)
+
+                # Extract locomotion command (orientation + velocity)
+                loco_cmd = self._extract_locomotion_data(tracked_body)
                 _t4 = time.perf_counter()
                 
                 # Tag capture timestamp and cache for freeze
@@ -248,6 +288,7 @@ class BodyTrackingNode:
                 # Publish to shared state
                 self.shared.set_tracking_data(arm_data)
                 self.shared.set_hand_tracking_data(hand_data)
+                self.shared.set_locomotion_command(loco_cmd)
                 
                 # Publish per-stage latency (seconds)
                 self.shared.set_loop_duration('lat_zed_grab', _t1 - _t0)
@@ -268,9 +309,10 @@ class BodyTrackingNode:
                     self.last_stats_time = time.time()
                 
                 # Handle CV window events
-                key = self.cv2.waitKey(1)
-                if key == ord('q'):
-                    self.shared.request_shutdown()
+                if _show_display:
+                    key = self.cv2.waitKey(1)
+                    if key == ord('q'):
+                        self.shared.request_shutdown()
                 # record loop duration
                 loop_dur = time.time() - loop_start
                 # publish last loop duration (seconds)
@@ -279,8 +321,9 @@ class BodyTrackingNode:
                 except Exception:
                     pass
 
-        image.free(sl.MEM.CPU)
-        self.cv2.destroyAllWindows()
+        if _show_display and image is not None:
+            image.free(sl.MEM.CPU)
+            self.cv2.destroyAllWindows()
     
     def _find_tracked_body(self, bodies):
         """Find the single person we're tracking by ZED tracking ID.
@@ -443,9 +486,9 @@ class BodyTrackingNode:
         # Finger keypoints have low confidence — accept anything > 5
         HAND_CONF = 5.0
 
-        # Distance thresholds (metres) — tune to your operator
+        # Distance thresholds (metres) — tune to your operator (hand motion not realized in sim)
         D_CLOSED = 0.1
-        D_OPEN   = 0.06
+        D_OPEN   = 0.07
 
         def _ratio(d):
             return float(np.clip((d - D_CLOSED) / (D_OPEN - D_CLOSED), 0.0, 1.0))
@@ -478,6 +521,125 @@ class BodyTrackingNode:
             right_open_close=self._last_r_oc,
         )
 
+    def _extract_locomotion_data(self, body) -> LocomotionCommand:
+        """Estimate locomotion commands from torso keypoints.
+
+        Orientation (roll, pitch):
+            Derived from the pelvis→neck direction vector.
+            ZED coord system: X=right, Y=up, Z=backward (from camera).
+            Roll  = atan2(dx, dy)  — positive = lean right (camera POV)
+            Pitch = atan2(-dz, dy) — positive = lean forward (toward camera)
+
+        Velocity:
+            Pelvis horizontal position is differentiated and low-pass filtered.
+            Robot forward = -Z (toward camera), robot lateral = -X (camera left).
+
+        Mode:
+            |v| > deadzone → walking (1), else standing (0).
+        """
+        if body is None:
+            # Person lost — return zero command (standing, no lean)
+            return LocomotionCommand(timestamp=time.time(), valid=False)
+
+        kp = body.keypoint
+        conf = body.keypoint_confidence
+
+        def _safe_kp(idx):
+            p = np.array([kp[idx][0], kp[idx][1], kp[idx][2]], dtype=np.float64)
+            return (p, True) if not np.any(np.isnan(p)) else (np.zeros(3), False)
+
+        def _safe_conf(idx):
+            c = float(conf[idx])
+            return c if not np.isnan(c) else 0.0
+
+        pelvis_pos, pelvis_ok = _safe_kp(0)   # PELVIS
+        neck_pos, neck_ok     = _safe_kp(3)   # NECK
+
+        if not (pelvis_ok and neck_ok):
+            return LocomotionCommand(timestamp=time.time(), valid=False)
+
+        # Reject low-confidence keypoints
+        min_conf = self.track_config.min_confidence
+        if min(_safe_conf(0), _safe_conf(3)) < min_conf:
+            return LocomotionCommand(timestamp=time.time(), valid=False)
+
+        # ── Orientation from torso vector ──────────────────────────
+        torso_vec = neck_pos - pelvis_pos  # roughly (0, L, 0) when upright
+        dy = torso_vec[1]  # vertical (Y=up)
+        if abs(dy) < 0.05:
+            # Degenerate — person nearly horizontal, skip
+            return LocomotionCommand(timestamp=time.time(), valid=False)
+
+        dx = torso_vec[0]   # lateral  (X=right in camera frame)
+        dz = torso_vec[2]   # depth    (Z=backward from camera)
+
+        roll  = float(np.arctan2(dx, dy))    # lean right  → positive
+        pitch_raw = float(-np.arctan2(-dz, dy))  # negated: lean forward → positive
+        pitch = pitch_raw * self._pitch_scale + self._pitch_offset  # scale + offset
+
+        # ── Yaw from shoulder orientation ──────────────────────────
+        # BODY_38: LEFT_SHOULDER=12, RIGHT_SHOULDER=13
+        # ZED coords: X=right, Y=up, Z=backward from camera
+        # Person facing camera: left_shoulder.x > right_shoulder.x
+        #   → (l−r) gives positive dx when facing camera → atan2(~0, +) ≈ 0
+        l_sh, l_sh_ok = _safe_kp(12)   # LEFT_SHOULDER
+        r_sh, r_sh_ok = _safe_kp(13)   # RIGHT_SHOULDER
+        yaw = 0.0
+        if l_sh_ok and r_sh_ok:
+            sh_dx = l_sh[0] - r_sh[0]   # horizontal (positive when facing camera)
+            sh_dz = l_sh[2] - r_sh[2]   # depth difference
+            if abs(sh_dx) > 0.01:        # avoid degenerate case
+                yaw = float(np.arctan2(sh_dz, sh_dx))/2  # body yaw angle
+
+        # ── Velocity from pelvis horizontal movement ───────────────
+        pelvis_filtered = self._pelvis_filter.update(pelvis_pos, True)
+        now = time.time()
+        vx_robot = 0.0
+        vy_robot = 0.0
+
+        if self._prev_pelvis_pos is not None:
+            dt = now - self._prev_pelvis_time
+            if 0.005 < dt < 0.5:  # guard against zero-dt or huge gaps
+                raw_vel = (pelvis_filtered - self._prev_pelvis_pos) / dt
+                # Smooth with EMA
+                a = self._loco_vel_alpha
+                self._pelvis_vel_filtered = a * raw_vel + (1.0 - a) * self._pelvis_vel_filtered
+                # Map camera frame → robot frame
+                # Robot forward = -Z (toward camera), robot left = -X
+                vx_robot = float(-self._pelvis_vel_filtered[2])  # forward
+                vy_robot = float(-self._pelvis_vel_filtered[0])  # lateral
+
+        self._prev_pelvis_pos = pelvis_filtered.copy()
+        self._prev_pelvis_time = now
+
+        # Clamp horizontal speed
+        speed = np.hypot(vx_robot, vy_robot)
+        if speed > self._loco_max_vel:
+            scale = self._loco_max_vel / speed
+            vx_robot *= scale
+            vy_robot *= scale
+            speed = self._loco_max_vel
+
+        # Deadzone → mode
+        if speed < self._loco_deadzone:
+            mode = 0  # standing
+            vx_robot = 0.0
+            vy_robot = 0.0
+        else:
+            mode = 1  # walking
+
+        return LocomotionCommand(
+            timestamp=now,
+            valid=True,
+            roll=roll,
+            pitch=pitch,
+            yaw=yaw,
+            vx=vx_robot,
+            vy=vy_robot,
+            yaw_rate=0.0,
+            mode=mode,
+        )
+
     def _dummy_tracking_loop(self):
         """Dummy tracking for testing without camera."""
         print("[Tracking] Running dummy tracking mode")
@@ -487,33 +649,36 @@ class BodyTrackingNode:
             loop_start = time.time()
             t = time.time() - t_start
             
-            # Simulate arm movement in standard XYZ frame (X forward, Y left, Z up)
+            # Simulate arm movement in ZED frame (X=right, Y=up, Z=backward)
+            # NOTE: ZED camera labels keypoints from its perspective (left/right of image)
+            # User faces camera, so ZED "left" is user's right, ZED "right" is user's left
+            # When transformed to robot frame: camera left → robot right, camera right → robot left
             arm_data = ArmTrackingData(
                 timestamp=time.time(),
                 valid=True,
-                body_com=np.array([2.0, 0.0, 1.0], dtype=np.float64),  # Transformed from [0,1,2]
-                left_shoulder=np.array([0.0, 0.0, 0.2], dtype=np.float64),  # Transformed from [0,0.2,0]
+                body_com=np.array([0.0, 1.0, 2.0], dtype=np.float64),  # ZED frame: body center
+                left_shoulder=np.array([0.2, 0.0, 0.0], dtype=np.float64),  # ZED left (user right)
                 left_elbow=np.array([
-                    -0.35 - 0.1*np.sin(t*0.7),  # Y -> Z
-                    -0.15 + 0.15*np.sin(t),  # -X -> Y
-                    0.1*np.cos(t)  # Z -> X
+                    0.15 + 0.15*np.sin(t),  # X: ZED right (user right side)
+                    -0.25 - 0.1*np.sin(t*0.7),  # Y: down
+                    -0.1*np.cos(t)  # Z: forward
                 ], dtype=np.float64),
                 left_wrist=np.array([
-                    -0.40 - 0.15*np.sin(t*0.7),  # Y -> Z
-                    -0.25 + 0.25*np.sin(t),  # -X -> Y
-                    0.15*np.cos(t)  # Z -> X
+                    0.25 + 0.25*np.sin(t),  # X: ZED right (user right side)
+                    -0.20 - 0.15*np.sin(t*0.7),  # Y: down
+                    -0.15*np.cos(t)  # Z: forward
                 ], dtype=np.float64),
                 left_confidence=90.0,
-                right_shoulder=np.array([0.0, 0.0, -0.2], dtype=np.float64),  # Transformed from [0,-0.2,0]
+                right_shoulder=np.array([-0.2, 0.0, 0.0], dtype=np.float64),  # ZED right (user left)
                 right_elbow=np.array([
-                    0.35 + 0.1*np.sin(t*0.7),  # -Y -> -Z
-                    0.15 - 0.15*np.sin(t),  # -X -> -Y
-                    0.1*np.cos(t)  # Z -> X
+                    -0.15 - 0.15*np.sin(t),  # X: ZED left (user left side)
+                    -0.25 - 0.1*np.sin(t*0.7),  # Y: down
+                    -0.1*np.cos(t)  # Z: forward
                 ], dtype=np.float64),
                 right_wrist=np.array([
-                    0.40 + 0.15*np.sin(t*0.7),  # -Y -> -Z
-                    0.25 - 0.25*np.sin(t),  # -X -> -Y
-                    0.15*np.cos(t)  # Z -> X
+                    -0.25 - 0.25*np.sin(t),  # X: ZED left (user left side)
+                    -0.20 - 0.15*np.sin(t*0.7),  # Y: down
+                    -0.15*np.cos(t)  # Z: forward
                 ], dtype=np.float64),
                 right_confidence=90.0,
             )
@@ -532,6 +697,19 @@ class BodyTrackingNode:
                 right_split=sp,
             )
             self.shared.set_hand_tracking_data(hand_data)
+
+            # Dummy locomotion command — gentle oscillating lean
+            loco_cmd = LocomotionCommand(
+                timestamp=time.time(),
+                valid=True,
+                roll=0.05 * np.sin(t * 0.5),
+                pitch=0.03 * np.sin(t * 0.3),
+                vx=0.0,
+                vy=0.0,
+                yaw_rate=0.0,
+                mode=0,
+            )
+            self.shared.set_locomotion_command(loco_cmd)
 
             # Update timing stats
             self.frame_count += 1

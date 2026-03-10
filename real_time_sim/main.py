@@ -3,16 +3,11 @@
 Real-time Simulation Pipeline - Main Entry Point
 
 Launches all nodes in proper order with synchronized data flow:
-1. Simulation (physics + visualization)
+1. Simulation (Mujoco fixed base)
 2. Controller (1kHz PD control)
-3. Retargeting (500Hz IK)
+3. Retargeting (IK)
 4. Body Tracking (30Hz ZED)
 
-Run with sudo for ZED camera access:
-    sudo /home/junhengl/real_time_human-humanoid_tracking/.venv/bin/python -m real_time_sim.main
-
-Or directly:
-    sudo /home/junhengl/real_time_human-humanoid_tracking/.venv/bin/python real_time_sim/main.py
 """
 
 import os
@@ -70,11 +65,11 @@ def print_timing_stats(shared: SharedState):
               f"display: {disp:.1f}ms | "
               f"extract: {trk_ext:.1f}ms | "
               f"tracking total: {trk_tot:.1f}ms")
-        print(f"          data age\u2192retarget: {data_age:.1f}ms | "
+        print(f"          data age->retarget: {data_age:.1f}ms | "
               f"IK solve: {ik_solve:.1f}ms | "
               f"retarget loop: {rt_tot:.1f}ms | "
-              f"output age\u2192ctrl: {rt_age:.1f}ms")
-        print(f"          END-TO-END (capture\u2192command): {e2e:.1f}ms")
+              f"output age->ctrl: {rt_age:.1f}ms")
+        print(f"          END-TO-END (capture->command): {e2e:.1f}ms")
 
 
 def main():

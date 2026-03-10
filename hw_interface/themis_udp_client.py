@@ -37,8 +37,15 @@ MSG_HAND_STATE_RESPONSE = 0x04
 MSG_ARM_JOINT_CMD       = 0x10
 MSG_MANIP_REF           = 0x11
 MSG_HAND_JOINT_CMD      = 0x12
+MSG_BASE_ORIENT         = 0x14
 MSG_HEARTBEAT           = 0x20
+MSG_MODE_QUERY          = 0x30
+MSG_MODE_RESPONSE       = 0x31
 MSG_ACK                 = 0xFE
+
+# Server operating modes
+MODE_DIRECT = 0    # Direct shared-memory (no WBC)
+MODE_WBC    = 1    # Through WBC pipeline
 
 SIDE_RIGHT      = 2      # +2 in the AOS convention
 SIDE_LEFT       = 0xFE   # -2 stored as unsigned byte
@@ -147,6 +154,23 @@ class ThemisUDPClient:
         self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._hb_thread.start()
         print(f"[ThemisClient] Connected to {self.robot_ip}:{self.port}")
+
+    def query_server_mode(self, retries: int = 3) -> Optional[int]:
+        """Ask the server what mode it's running in.
+
+        Returns
+        -------
+        MODE_DIRECT (0), MODE_WBC (1), or None if unreachable.
+        """
+        for _ in range(retries):
+            try:
+                self._send(struct.pack('B', MSG_MODE_QUERY))
+                data = self._recv()
+                if len(data) >= 2 and data[0] == MSG_MODE_RESPONSE:
+                    return int(data[1])
+            except (socket.timeout, Exception):
+                pass
+        return None
 
     def disconnect(self):
         """Close socket and stop heartbeat."""
@@ -280,9 +304,9 @@ class ThemisUDPClient:
                               right_arm_rate: Optional[np.ndarray] = None,
                               left_arm_rate: Optional[np.ndarray] = None,
                               right_mode: float = 100.0,   # POSE
-                              right_phase: float = 1.0,    # STANDBY
+                              right_phase: float = 0.0,    # SWING
                               left_mode: float = 100.0,
-                              left_phase: float = 1.0) -> bool:
+                              left_phase: float = 0.0) -> bool:
         """
         Send manipulation reference (goes to MANIPULATION_REFERENCE for WBC).
 
@@ -293,7 +317,7 @@ class ThemisUDPClient:
         right_arm_rate : (7,) desired joint velocities (default zeros)
         left_arm_rate  : (7,) desired joint velocities (default zeros)
         right_mode     : manipulation mode (100=POSE)
-        right_phase    : manipulation phase (1=STANDBY)
+        right_phase    : manipulation phase (0=SWING)
         left_mode      : manipulation mode
         left_phase     : manipulation phase
 
@@ -359,6 +383,22 @@ class ThemisUDPClient:
         fb.timestamp         = float(arr[i]); i += 1
         fb.valid = True
         return fb
+
+    # ─────────────────────────────────────────────────────────────────
+    # Base orientation command
+    # ─────────────────────────────────────────────────────────────────
+    def send_base_orientation(self, roll: float, pitch: float, yaw: float = 0.0):
+        """
+        Send base orientation command (fire-and-forget, no ACK).
+
+        Parameters
+        ----------
+        roll  : float — roll angle [rad]
+        pitch : float — pitch angle [rad]
+        yaw   : float — yaw angle [rad], default 0
+        """
+        buf = np.array([roll, pitch, yaw], dtype=np.float64)
+        self._send(struct.pack('B', MSG_BASE_ORIENT) + buf.tobytes())
 
     # ─────────────────────────────────────────────────────────────────
     # Hand (DXL) joint commands

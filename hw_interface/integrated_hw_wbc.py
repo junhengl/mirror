@@ -38,10 +38,10 @@ Architecture:
   └─────────────────────────────────────────────────────────────────┘
 
 Usage:
-  # 1. Robot PC — start the SAFE server:
+  # 1. Robot PC — start the unified server (auto-detects WBC):
   ssh themis@192.168.0.11
   cd /home/themis/THEMIS/THEMIS
-  python3 ~/wbc_udp_server.py --port 9870
+  python3 ~/themis_udp_server.py --port 9870
 
   # 2. Desktop — run with ZED camera:
   sudo .venv/bin/python hw_interface/integrated_hw_wbc.py
@@ -77,7 +77,7 @@ from real_time_sim.nodes.body_tracking_node import BodyTrackingNode
 from real_time_sim.nodes.retargeting_node import RetargetingNode
 from real_time_sim.joint_mapping import JointMapping
 
-from hw_interface.themis_udp_client import ThemisUDPClient, ThemisStateFeedback
+from hw_interface.themis_udp_client import ThemisUDPClient, ThemisStateFeedback, MODE_DIRECT, MODE_WBC
 from hw_interface.hw_visualizer import HardwareVisualizer
 from hw_interface.experiment_logger import ExperimentLogger
 
@@ -92,8 +92,10 @@ KP_SOFT = np.full(7, 100.0)
 KD_SOFT = np.full(7,  3.0)
 
 MSG_ARM_JOINT_CMD  = 0x10
+MSG_MANIP_REF      = 0x11
 MSG_HAND_JOINT_CMD = 0x12
 MSG_HEAD_JOINT_CMD = 0x13
+MSG_BASE_ORIENT    = 0x14
 MSG_STATE_REQUEST  = 0x01
 MSG_STATE_RESPONSE = 0x02
 SIDE_RIGHT = 2
@@ -102,19 +104,23 @@ SIDE_RIGHT_HAND = 3
 SIDE_LEFT_HAND  = 0xFD
 SIDE_HEAD = 0
 
+# ── Manipulation reference constants (from manipulation_macros.py) ────
+MANIP_MODE_POSE   = 100.0   # POSE mode
+MANIP_PHASE_SWING = 0.0     # SWING phase — WBC treats arm as free to move
+
 # ── Recorded hand poses (from test_hand_open_close.py) ──────────────
 #  Motor order: [f1_prox, f1_dist, f2_prox, f2_dist, f3_prox, f3_dist, split]
-# left fist mode
-LEFT_FIST  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -1.047])
-LEFT_OPEN  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -1.047])
-RIGHT_FIST = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
-RIGHT_OPEN = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
+# # left fist mode
+# LEFT_FIST  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -1.047])
+# LEFT_OPEN  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -1.047])
+# RIGHT_FIST = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
+# RIGHT_OPEN = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
 
 # gripper mode
-# LEFT_FIST  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -2.6047])
-# LEFT_OPEN  = np.array([+1.0937, +0.2065, +1.1075, +0.2817, -0.3421, +0.2541, -2.6108])
-# RIGHT_FIST = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
-# RIGHT_OPEN = np.array([+1.1735, +0.6872, +1.1827, +0.0353, -0.6703, +0.6489, -2.4743])
+LEFT_FIST  = np.array([+1.5156, +0.8099, +1.5125, +0.8391, +0.0690, +0.6366, -2.6047])
+LEFT_OPEN  = np.array([+1.0937, +0.2065, +1.1075, +0.2817, -0.3421, +0.2541, -2.6108])
+RIGHT_FIST = np.array([+1.5723, +0.9327, +1.5493, +1.0293, -0.0782, +0.9342, -2.5203])
+RIGHT_OPEN = np.array([+1.1735, +0.6872, +1.1827, +0.0353, -0.6703, +0.6489, -2.4743])
 
 KP_HAND = np.full(7, 5.0)
 KD_HAND = np.full(7, 0.5)
@@ -126,6 +132,11 @@ KD_HEAD = np.full(2,  1.0)
 
 # ── Hand smoothing ───────────────────────────────────────────────────
 MAX_HAND_VEL     = 2.0     # rad/s per motor — rate limit on hand cmds
+
+# ── Base / head orientation clamps (radians) ─────────────────────────
+MAX_ROLL  = np.radians(15.0)   # max body roll  (±15°)
+MAX_PITCH = np.radians(15.0)   # max body pitch (±15°)
+MAX_YAW   = np.radians(30.0)   # max body yaw   (±30°)
 
 # Shutdown flag
 _shutdown = False
@@ -159,6 +170,31 @@ def _send_both_arms_ff(client, q_r, q_l, kp, kd):
         client._send(pkt)
 
 
+def _send_manip_ref_ff(client, q_r, q_l,
+                       mode=MANIP_MODE_POSE, phase=MANIP_PHASE_SWING):
+    """Fire-and-forget manipulation reference — never blocks.
+
+    Writes to MANIPULATION_REFERENCE shared memory on the robot,
+    which is read by the onboard WBC.  This avoids conflicts with
+    direct JOINT_COMMAND writes that the WBC is also controlling.
+
+    Uses POSE mode + SWING phase so the WBC treats the arm as
+    position-tracking with no contact/hold constraints.
+    """
+    rp = np.asarray(q_r, dtype=np.float64).ravel()
+    lp = np.asarray(q_l, dtype=np.float64).ravel()
+    rr = np.zeros(7, dtype=np.float64)   # zero rate
+    lr = np.zeros(7, dtype=np.float64)   # zero rate
+
+    buf = np.concatenate([
+        rp, rr, [mode, phase],
+        lp, lr, [mode, phase],
+    ]).astype(np.float64)
+
+    pkt = struct.pack('B', MSG_MANIP_REF) + buf.tobytes()
+    client._send(pkt)
+
+
 def _send_both_hands_ff(client, q_r, q_l, kp, kd):
     """Fire-and-forget both hand commands — never blocks."""
     dq = np.zeros(7, dtype=np.float64)
@@ -185,6 +221,17 @@ def _send_head_ff(client, q, kp, kd):
            + struct.pack('B', SIDE_HEAD)
            + q_.tobytes() + dq.tobytes() + u.tobytes()
            + kp_.tobytes() + kd_.tobytes())
+    client._send(pkt)
+
+
+def _send_base_orient_ff(client, roll, pitch, yaw=0.0):
+    """Fire-and-forget base orientation command — never blocks.
+
+    Calls lm_api.set_base_orientation(roll, pitch, yaw) on the robot
+    via the wbc_udp_server bridge.
+    """
+    buf = np.array([float(roll), float(pitch), float(yaw)], dtype=np.float64)
+    pkt = struct.pack('B', MSG_BASE_ORIENT) + buf.tobytes()
     client._send(pkt)
 
 
@@ -308,6 +355,11 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     """
     1 kHz command loop that reads retargeting output and sends to robot.
 
+    Arms are always sent via MANIPULATION_REFERENCE (POSE + SWING).
+    The server writes this to MM.MANIPULATION_REFERENCE in WBC mode
+    (WBC reads the reference through its normal pipeline), or converts
+    to JOINT_COMMAND in direct mode.
+
     Safety features (same as test_arm_wbc.py):
       • Ramp to IDLE on start
       • Smooth blend from IDLE to tracking
@@ -328,7 +380,7 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
         )
 
     # ── Phase 1: Ramp to IDLE ────────────────────────────────────────
-    print(f"\n[Phase 1] Ramping to IDLE over 3.0 s …")
+    print(f"\n[Phase 1] Ramping to IDLE over 3.0 s ...")
     fb = fb_thread.get()
     if fb.valid:
         start_r = fb.right_arm_q.copy()
@@ -346,8 +398,8 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
         if now - t0 >= RAMP:
             break
         a = (now - t0) / RAMP
-        _send_both_arms_ff(client, lerp(start_r, IDLE_R_HW, a),
-                           lerp(start_l, IDLE_L_HW, a), KP_SOFT, KD_SOFT)
+        _send_manip_ref_ff(client, lerp(start_r, IDLE_R_HW, a),
+                           lerp(start_l, IDLE_L_HW, a))
         # Ramp hands to FIST (from current → fist, same alpha)
         _send_both_hands_ff(client, lerp(RIGHT_OPEN, RIGHT_FIST, a),
                             lerp(LEFT_OPEN, LEFT_FIST, a), KP_HAND, KD_HAND)
@@ -359,7 +411,7 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     # Hold IDLE 0.5 s
     t0 = time.perf_counter(); tick = t0
     while time.perf_counter() - t0 < 0.5 and not _shutdown:
-        _send_both_arms_ff(client, IDLE_R_HW, IDLE_L_HW, KP_SOFT, KD_SOFT)
+        _send_manip_ref_ff(client, IDLE_R_HW, IDLE_L_HW)
         _send_both_hands_ff(client, RIGHT_FIST, LEFT_FIST, KP_HAND, KD_HAND)
         _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
         tick += dt; _spin_wait(tick)
@@ -367,7 +419,7 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     if _shutdown:
         return
 
-    print("[Phase 1] At IDLE — waiting for valid tracking …")
+    print("[Phase 1] At IDLE - waiting for valid tracking ...")
 
     # ── Phase 2: Tracking loop ───────────────────────────────────────
     last_cmd_r = IDLE_R_HW.copy()
@@ -385,7 +437,7 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     step = 0
     tracking_count = 0
 
-    print("[Phase 2] Tracking active — 1 kHz command loop running\n")
+    print("[Phase 2] Tracking active - 1 kHz command loop running\n")
 
     while not _shutdown:
         now = time.perf_counter()
@@ -420,7 +472,7 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
                 blend_t0 = now
                 blend_start_r = last_cmd_r.copy()
                 blend_start_l = last_cmd_l.copy()
-                print("[Phase 2] First valid IK — blending to tracked pose …")
+                print("[Phase 2] First valid IK - blending to tracked pose ...")
 
             if now - blend_t0 < blend_time:
                 alpha = (now - blend_t0) / blend_time
@@ -439,8 +491,8 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
             cmd_r = last_cmd_r
             cmd_l = last_cmd_l
 
-        # Send arms
-        _send_both_arms_ff(client, cmd_r, cmd_l, KP_SOFT, KD_SOFT)
+        # Send arms via MANIPULATION_REFERENCE (WBC-compatible)
+        _send_manip_ref_ff(client, cmd_r, cmd_l)
         last_cmd_r = cmd_r.copy()
         last_cmd_l = cmd_l.copy()
 
@@ -466,8 +518,21 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
         last_hand_r = hand_cmd_r.copy()
         last_hand_l = hand_cmd_l.copy()
 
-        # ── Head: hold at zero ───────────────────────────────────────
-        _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
+        # ── Base orientation from body tracking ──────────────────────
+        loco = shared.get_locomotion_command()
+        if loco.valid:
+            c_roll  = float(np.clip(loco.roll,  -MAX_ROLL,  MAX_ROLL))
+            c_pitch = float(np.clip(loco.pitch, -MAX_PITCH, MAX_PITCH))
+            c_yaw   = float(np.clip(loco.yaw,   -MAX_YAW,   MAX_YAW))
+            _send_base_orient_ff(client, c_roll, c_pitch, c_yaw)
+
+        # ── Head: compensate torso lean/yaw to keep camera level ─────
+        #    head_cmd[0] = yaw,  head_cmd[1] = pitch
+        head_cmd = np.zeros(2, dtype=np.float64)
+        if loco.valid:
+            head_cmd[0] = float(np.clip(-loco.yaw,   -MAX_YAW,   MAX_YAW))
+            head_cmd[1] = float(np.clip(-loco.pitch, -MAX_PITCH, MAX_PITCH))
+        _send_head_ff(client, head_cmd, KP_HEAD, KD_HEAD)
 
         # Also publish robot feedback to SharedState for IK warm-start
         # (use background thread's latest — no blocking)
@@ -530,6 +595,13 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
                       f"retarget loop: {rt_tot:.1f}ms | "
                       f"output age→hw: {rt_age:.1f}ms")
                 print(f"          END-TO-END (capture→command): {e2e:.1f}ms")
+            # Locomotion command (roll/pitch sent to robot)
+            loco = shared.get_locomotion_command()
+            if loco.valid:
+                mode_str = "WALKING" if loco.mode == 1 else "STANDING"
+                print(f"[Locomotion] mode={mode_str} | "
+                      f"vel=({loco.vx:+.3f}, {loco.vy:+.3f}) m/s | "
+                      f"roll={np.degrees(loco.roll):+.1f}° pitch={np.degrees(loco.pitch):+.1f}° yaw={np.degrees(loco.yaw):+.1f}°")
             # if fb_now.valid and retarget.valid:
             #     err_r = np.degrees(np.linalg.norm(fb_now.right_arm_q - cmd_r))
             #     err_l = np.degrees(np.linalg.norm(fb_now.left_arm_q  - cmd_l))
@@ -558,8 +630,8 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     for _ in range(int(RAMP * rate_hz)):
         now = time.perf_counter()
         a = min((now - t0) / RAMP, 1.0)
-        _send_both_arms_ff(client, lerp(cur_r, IDLE_R_HW, a),
-                           lerp(cur_l, IDLE_L_HW, a), KP_SOFT, KD_SOFT)
+        _send_manip_ref_ff(client, lerp(cur_r, IDLE_R_HW, a),
+                           lerp(cur_l, IDLE_L_HW, a))
         _send_both_hands_ff(client, lerp(cur_hand_r, RIGHT_FIST, a),
                             lerp(cur_hand_l, LEFT_FIST, a), KP_HAND, KD_HAND)
         _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
@@ -569,7 +641,7 @@ def run_pipeline(client, shared, config, joint_mapping, fb_thread,
     # Hold IDLE 0.5 s
     t0 = time.perf_counter(); tick = t0
     while time.perf_counter() - t0 < 0.5:
-        _send_both_arms_ff(client, IDLE_R_HW, IDLE_L_HW, KP_SOFT, KD_SOFT)
+        _send_manip_ref_ff(client, IDLE_R_HW, IDLE_L_HW)
         _send_both_hands_ff(client, RIGHT_FIST, LEFT_FIST, KP_HAND, KD_HAND)
         _send_head_ff(client, HEAD_ZERO, KP_HEAD, KD_HEAD)
         tick += dt; _spin_wait(tick)
@@ -596,6 +668,8 @@ def main():
     parser.add_argument("--kd", type=float, default=2.0)
     parser.add_argument("--no-camera", action="store_true",
                         help="Use dummy tracking (no ZED camera)")
+    parser.add_argument("--fast", action="store_true",
+                        help="Fast mode: VGA resolution, FAST body model, no skeleton display")
     parser.add_argument("--dry-run", action="store_true",
                         help="No real robot (mock UDP client)")
     parser.add_argument("--hang-height", type=float, default=1.3,
@@ -623,6 +697,11 @@ def main():
     print(f"  Blend:       {args.blend_time:.1f} s")
     print(f"  Max vel:     {args.max_vel:.1f} rad/s")
     print(f"  Camera:      {'dummy' if args.no_camera else 'ZED'}")
+    print(f"  Fast mode:   {args.fast}")
+    if args.fast:
+        print(f"    Resolution:  VGA (100 FPS)")
+        print(f"    Model:       HUMAN_BODY_FAST")
+        print(f"    Display:     OFF")
     print(f"  Dry-run:     {args.dry_run}")
     print(f"  Visualizer:  {'OFF' if args.no_viz else 'ON'}")
     print(f"  Log rate:    {args.log_rate:.0f} Hz")
@@ -631,6 +710,13 @@ def main():
     # ── Config ───────────────────────────────────────────────────────
     config = PipelineConfig()
     config.sim.base_height = args.hang_height
+
+    # Fast mode: lower resolution + faster model + no skeleton display
+    if args.fast:
+        config.tracking.fast_mode = True
+        config.tracking.camera_resolution = "VGA"
+        config.tracking.body_tracking_model = "FAST"
+        config.tracking.display_skeleton = False
 
     # ── Shared state ─────────────────────────────────────────────────
     shared = SharedState()
@@ -641,6 +727,20 @@ def main():
     else:
         client = ThemisUDPClient(robot_ip=args.robot_ip, port=args.port)
     client.connect()
+
+    # ── Query server mode ────────────────────────────────────────────
+    server_mode = None
+    if not args.dry_run:
+        server_mode = client.query_server_mode()
+        if server_mode is not None:
+            mode_name = "WBC" if server_mode == MODE_WBC else "DIRECT"
+            print(f"[Main] Server mode: {mode_name}")
+            if server_mode == MODE_WBC:
+                print(f"[Main]   Arms → MANIPULATION_REFERENCE (no conflict with WBC)")
+            else:
+                print(f"[Main]   Arms → JOINT_COMMAND (direct SHM)")
+        else:
+            print(f"[Main] WARNING: Could not query server mode (older server?)")
 
     # ── Joint mapping ────────────────────────────────────────────────
     joint_mapping = JointMapping(config.joint_mapping)
@@ -705,7 +805,7 @@ def main():
         traceback.print_exc()
 
     finally:
-        print("\n[Main] Shutting down …")
+        print("\n[Main] Shutting down ...")
         shared.request_shutdown()
         if viz is not None:
             viz.stop()

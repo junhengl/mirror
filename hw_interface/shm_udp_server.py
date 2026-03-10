@@ -239,7 +239,7 @@ def run_server(host: str, port: int):
                 print(f"[bridge] Processed {pkt_count} packets")
 
     except KeyboardInterrupt:
-        print("\n[bridge] Shutting down …")
+        print("\n[bridge] Shutting down ...")
     finally:
         sock.close()
         print("[bridge] Server stopped.")

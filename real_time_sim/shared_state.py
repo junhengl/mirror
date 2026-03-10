@@ -162,6 +162,41 @@ class RobotFeedback:
         )
 
 
+@dataclass
+class LocomotionCommand:
+    """Locomotion command estimated from body tracking keypoints.
+
+    Orientation is derived from the pelvis→neck torso vector.
+    Velocity is derived from pelvis horizontal movement over time.
+    Mode is inferred from velocity magnitude vs a deadzone threshold.
+    """
+    timestamp: float = 0.0
+    valid: bool = False
+    # Body orientation (radians)
+    roll: float = 0.0       # Positive = lean right (camera POV)
+    pitch: float = 0.0      # Positive = lean forward (toward camera)
+    yaw: float = 0.0        # Body yaw from shoulder orientation (atan2 of depth/horiz)
+    # Velocity command (m/s, robot frame: vx=forward, vy=left)
+    vx: float = 0.0         # Forward velocity
+    vy: float = 0.0         # Lateral velocity
+    yaw_rate: float = 0.0   # Yaw rate (rad/s), reserved
+    # Mode: 0 = standing, 1 = walking
+    mode: int = 0
+
+    def copy(self) -> 'LocomotionCommand':
+        return LocomotionCommand(
+            timestamp=self.timestamp,
+            valid=self.valid,
+            roll=self.roll,
+            pitch=self.pitch,
+            yaw=self.yaw,
+            vx=self.vx,
+            vy=self.vy,
+            yaw_rate=self.yaw_rate,
+            mode=self.mode,
+        )
+
+
 class SharedState:
     """
     Thread-safe shared state container for all inter-node communication.
@@ -184,12 +219,14 @@ class SharedState:
         self._feedback_lock = threading.Lock()
         self._fsm_lock = threading.Lock()
         self._command_lock = threading.Lock()
+        self._locomotion_lock = threading.Lock()
         
         # Data containers
         self._tracking_data = ArmTrackingData()
         self._hand_tracking_data = HandTrackingData()
         self._retarget_output = RetargetingOutput()
         self._robot_feedback = RobotFeedback()
+        self._locomotion_cmd = LocomotionCommand()
         self._fsm_state = RobotState.INIT
         
         # Control command (torques)
@@ -232,6 +269,17 @@ class SharedState:
         """Get hand tracking data (called by command loop)."""
         with self._hand_tracking_lock:
             return self._hand_tracking_data.copy()
+
+    # --- Locomotion Command ---
+    def set_locomotion_command(self, cmd: LocomotionCommand):
+        """Set locomotion command (called by tracking node)."""
+        with self._locomotion_lock:
+            self._locomotion_cmd = cmd.copy()
+
+    def get_locomotion_command(self) -> LocomotionCommand:
+        """Get locomotion command (called by command loop)."""
+        with self._locomotion_lock:
+            return self._locomotion_cmd.copy()
 
     # --- Retargeting Output ---
     def set_retarget_output(self, output: RetargetingOutput):

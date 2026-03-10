@@ -28,7 +28,7 @@ import numpy as np
 
 # ── KinDynLib imports (same path setup as retargeting_node.py) ────────
 _PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_KINDYN_DIR = os.path.join(_PROJ_DIR, "KinDynLib_single")
+_KINDYN_DIR = os.path.join(_PROJ_DIR, "KinDynLib")
 if _KINDYN_DIR not in sys.path:
     sys.path.insert(0, _KINDYN_DIR)
 

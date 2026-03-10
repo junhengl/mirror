@@ -29,7 +29,8 @@ class ControlConfig:
     
     # PD gains per joint group [kp, kd]
     # Lower Kp and HIGHER Kd for stability when hanging (damping is critical!)
-    leg_gains: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0]))  # [kp, kd]
+    leg_gains: np.ndarray = field(default_factory=lambda: np.array([100.0, 2.0]))  # [kp, kd]
+    ankle_gains: np.ndarray = field(default_factory=lambda: np.array([10.0, 0.5]))  # Reduced for ankle to avoid shaking
     arm_gains: np.ndarray = field(default_factory=lambda: np.array([70.0, 1.0]))
     head_gains: np.ndarray = field(default_factory=lambda: np.array([10.0, 1.0]))
     
@@ -75,8 +76,14 @@ class TrackingConfig:
     min_confidence: float = 30.0
     
     # Filter parameters
-    filter_alpha: float = 0.99
+    filter_alpha: float = 0.5
     jump_threshold: float = 0.2  # meters
+    
+    # Fast mode: lower resolution + no display for minimum latency
+    fast_mode: bool = False
+    camera_resolution: str = "HD720"    # "HD2K", "HD1080", "HD720", "VGA"
+    body_tracking_model: str = "ACCURATE"  # "ACCURATE" or "FAST"
+    display_skeleton: bool = True        # Show OpenCV skeleton overlay window
 
 
 @dataclass 
@@ -87,8 +94,8 @@ class FSMConfig:
     blend_duration: float = 2.0  # Longer transition blend time for smooth tracking start
     
     # Safety limits (very permissive for hanging robot - physics provides natural damping)
-    max_joint_velocity: float = 500.0  # rad/s - high because hanging robot is naturally damped
-    max_tracking_error: float = 0.5  # meters
+    max_joint_velocity: float = 10.0  # rad/s - high because hanging robot is naturally damped
+    max_tracking_error: float = 0.1  # meters
 
 
 def _create_default_joint_mapping() -> JointMappingConfig:
@@ -102,11 +109,11 @@ def _create_default_joint_mapping() -> JointMappingConfig:
     """
     # Sign: +1 keeps direction, -1 flips. All +1 for now (no flips).
     sign = np.ones(28, dtype=np.float64)
-    sign[12] = -1.0  # shoulder pitch R
-    sign[19] = -1.0  # shoulder pitch L
-    sign[14] = -1.0  # shoulder Yaw R
+    sign[12] = 1.0  # shoulder pitch R
+    sign[19] = 1.0  # shoulder pitch L
+    sign[14] = 1.0  # shoulder Yaw R
     sign[15] = -1.0  # elbow pitch R
-    sign[16] = 1.0  # forarm roll R
+    sign[16] = -1.0  # forarm roll R
     sign[17] = -1.0  # forarm pitch R
     sign[18] = -1.0  # wrist roll R
     sign[21] = -1.0  # upperarm yaw L

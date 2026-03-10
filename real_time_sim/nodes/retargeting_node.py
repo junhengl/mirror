@@ -2,7 +2,6 @@
 Retargeting Node (500 Hz)
 
 IK-based retargeting from body tracking to robot joint angles.
-Runs in separate thread, reads tracking data and publishes desired poses.
 """
 
 import numpy as np
@@ -12,8 +11,8 @@ import sys
 import os
 from typing import Optional, Dict
 
-# Add KinDynLib_single to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'KinDynLib_single'))
+# Add KinDynLib to path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'KinDynLib'))
 
 from ..shared_state import SharedState, ArmTrackingData, RetargetingOutput, RobotState
 from ..config import RetargetingConfig, PipelineConfig
@@ -77,13 +76,21 @@ class RetargetingNode:
         # Reference pose tracking (for regularization toward favorable configuration)
         self.q_ref = self.retarget_config.q_ref
         if self.q_ref is None:
-            # Default favorable pose: arms relaxed, palms facing down
-            # [base_6DOF, right_arm_7DOF, left_arm_7DOF]
+            # Default favorable pose: bent standing with head fixed, arms relaxed
+            # [base_6DOF, right_leg_6DOF, left_leg_6DOF, right_arm_7DOF, left_arm_7DOF, head_2DOF]
             self.q_ref = np.array([
                 0.0, 0.0, 1.3,                    # base: xy center, z at hanging height
                 0.0, 0.0, 0.0,                    # base: rpy neutral
-                0.0, -1.75, 1.57, 1.57, 0.0, -0.5, 0.0,  # right arm: relaxed
-                0.0, -1.75, 1.57, 1.57, 0.0, -0.5, 0.0,  # left arm: relaxed
+                # Right leg (6 DOF): bent standing configuration
+                0.0, -0.8, 1.2, -0.4, 0.0, 0.0,
+                # Left leg (6 DOF): bent standing configuration
+                0.0, -0.8, 1.2, -0.4, 0.0, 0.0,
+                # Right arm (7 DOF): relaxed
+                0.0, -1.75, 1.57, 1.57, 0.0, -0.5, 0.0,
+                # Left arm (7 DOF): relaxed
+                0.0, -1.75, 1.57, 1.57, 0.0, -0.5, 0.0,
+                # Head (2 DOF): fixed at zero
+                0.0, 0.0,
             ], dtype=np.float64)
         self.w_ref = self.retarget_config.w_ref
         
@@ -92,7 +99,7 @@ class RetargetingNode:
         
         # Output smoothing
         self.filtered_q = self.q.copy()
-        self.filter_alpha = 0.4
+        self.filter_alpha = 0.2
         self.max_joint_delta = 50  # rad per step at 500Hz
         
         # Base offset for visualization (from config)
@@ -330,7 +337,7 @@ class RetargetingNode:
             # timer for IK solve
             ik_start = time.perf_counter()
 
-            # # Solve IK step (QP solver: distributed ProxQP)
+            # Solve IK step (QP solver: distributed OSQP)
             # q_des, dq_des = self.robot.update_task_space_command_qp_distributed(
             #     desired['x_elbow_l_des'], desired['x_elbow_r_des'],
             #     x_elbow_l, x_elbow_r,
@@ -340,43 +347,22 @@ class RetargetingNode:
             #     self.com_des
             # )
 
-            # # Solve IK step (GPU-batched QP solver - single batch)
-            # q_des, dq_des = self.robot.update_task_space_command_qp_gpu_batch_distributed(
-            #             desired['x_elbow_l_des'], desired['x_elbow_r_des'], x_elbow_l, x_elbow_r,
-            #             desired['x_hand_l_des'], desired['x_hand_r_des'], x_hand_l, x_hand_r,
-            #             J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
-            #             self.com_des,
-            #             n_batch=4096, max_iter=20,
-            #             q_ref=self.q_ref,
-            #             w_ref=self.w_ref  # reference pose weight
-            # )
-
-            #  solve IK step with alpha regulation 
-            q_des, dq_des = self.robot.update_task_space_command_qp_gpu_batch_distributed_alpha(
+            # Solve IK step with lyapunov regulation
+            q_des, dq_des = self.robot.update_task_space_command_qp_gpu_batch_distributed_alpha_lyapunov(
                         desired['x_elbow_l_des'], desired['x_elbow_r_des'], x_elbow_l, x_elbow_r,
                         desired['x_hand_l_des'], desired['x_hand_r_des'], x_hand_l, x_hand_r,
                         J_elbow_l, J_elbow_r, J_hand_l, J_hand_r,
                         self.com_des,
-                        n_batch=4096, max_iter=50,
+                        n_batch=1024, max_iter=50,
                         pos_threshold=0.005,
-                        q_ref=None,
-                        w_ref=0.0,
                         n_alpha=8,
-                        delta_progress=0.001,
+                        eta=0.0005,
+                        eps_q=0.01,
+                        eps_V=0.001,
                         dq_max=0.5
             )
 
-            q_des *= 0.0
-            # q_des [20] = -np.pi/6
-            # q_des [27] = -np.pi/6
-
-            q_des [19] = -np.pi/6
-            q_des [26] = np.pi/6
-            q_des [21] = np.pi/2
-            q_des [28] = np.pi/2
-
-            # q_des [22] = np.pi/6
-            # q_des [29] = np.pi/6
+            # q_des *= 0.0  # DEBUG: test zero pose
 
             ik_time = time.perf_counter() - ik_start
             self.shared.set_loop_duration('lat_ik_solve', ik_time)
@@ -410,7 +396,7 @@ class RetargetingNode:
             output.valid = False
             return output
         
-        # Update internal state
+        # # Update internal state
         self.q = q_current
         self.dq = dq_current
         
@@ -426,8 +412,16 @@ class RetargetingNode:
         output.q_des = self.filtered_q[6:6+28].copy()
         output.dq_des = dq_current[6:6+28].copy()
 
-        # output.q_des[14] *=-1.0  
-        # output.dq_des[14] *=-1.0
+        # Override head and leg q_des with fixed positions (not controlled by IK)
+        # Layout [28]: right_leg(0-5), left_leg(6-11), right_arm(12-18), left_arm(19-25), head(26-27)
+        # Legs: bent standing configuration
+        leg_q_fixed = np.array([0.0, 0.0, -0.5, 1.0, -0.5, 0.0], dtype=np.float64)
+        output.q_des[0:6] = leg_q_fixed    # right leg
+        output.q_des[6:12] = leg_q_fixed   # left leg
+        output.dq_des[0:12] = 0.0          # zero velocity for legs
+        # Head: fixed at zero
+        output.q_des[26:28] = 0.0
+        output.dq_des[26:28] = 0.0
         # print all the desired joint angles for debugging
         # print(f"Desired joint angles (degrees): {np.degrees(output.q_des)}  (shoulder_pitch_r={np.degrees(output.q_des[12]):.1f}, shoulder_roll_r={np.degrees(output.q_des[13]):.1f}, shoulder_yaw_r={np.degrees(output.q_des[14]):.1f}, elbow_pitch_r={np.degrees(output.q_des[15]):.1f}, elbow_yaw_r={np.degrees(output.q_des[16]):.1f}, wrist_pitch_r={np.degrees(output.q_des[17]):.1f}, wrist_yaw_r={np.degrees(output.q_des[18]):.1f}, shoulder_pitch_l={np.degrees(output.q_des[19]):.1f}, shoulder_roll_l={np.degrees(output.q_des[20]):.1f}, shoulder_yaw_l={np.degrees(output.q_des[21]):.1f}, elbow_pitch_l={np.degrees(output.q_des[22]):.1f}, elbow_yaw_l={np.degrees(output.q_des[23]):.1f}, wrist_pitch_l={np.degrees(output.q_des[24]):.1f}, wrist_yaw_l={np.degrees(output.q_des[25]):.1f})")
         
@@ -451,4 +445,3 @@ class RetargetingNode:
         return output
 
 
-# sudo .venv/bin/python -m real_time_sim.main

@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mujoco model="TH02-A7-torque">
-  <compiler angle="radian" meshdir="/home/junhengl/body_tracking/themis/meshes" eulerseq="xyz" />
+  <compiler angle="radian" meshdir="./meshes" eulerseq="xyz" />
   <option timestep="0.001" gravity="0 0 -9.81" />
   <visual>
     <headlight ambient="0.3 0.3 0.3" diffuse="0.4 0.4 0.4" specular="0.1 0.1 0.1" />
@@ -55,29 +55,29 @@
         <inertial pos="0.00398 -0.00006 0.00636" mass="0.83264" diaginertia="0.0019 0.00124 0.00094" />
         <geom type="mesh" mesh="HIP_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
         <body name="HIP_ABAD_R" pos="0.141 0 0" quat="0.4999999998974482 0.5 -0.5000000001025517 -0.5">
-          <joint name="HIP_ROLL_R" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
+          <joint name="HIP_ROLL_R" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="0.2" />
           <inertial pos="-0.002 0.00147 0.00404" mass="2.78794" fullinertia="0.01442 0.00791 0.0072 0.0 -2e-05 0.0" />
           <geom type="mesh" mesh="HIP_ABAD_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
           <body name="FEMUR_R" pos="0.029 0 0" quat="0.6532814823289134 -0.27059805020292127 0.6532814824399145 -0.2705980502029213">
-            <joint name="HIP_PITCH_R" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
+            <joint name="HIP_PITCH_R" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="0.2" />
             <inertial pos="0.06111 0.00174 0.02002" mass="3.75384" fullinertia="0.01172 0.07026 0.07594 0.00157 0.00098 0.00014" />
             <geom type="mesh" mesh="FEMUR_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
             <body name="TIBIA_R" pos="0.375 0 0">
-              <joint name="KNEE_PITCH_R" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
+              <joint name="KNEE_PITCH_R" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="0.2" />
               <inertial pos="0.09678 0.00694 -0.00006" mass="1.27716" fullinertia="0.00091 0.02323 0.02318 0.00069 -1e-05 0.0" />
               <geom type="mesh" mesh="TIBIA_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
               <body name="ANKLE_R" pos="0.375 0 0">
-                <joint name="ANKLE_PITCH_R" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
-                <inertial pos="0 0 0" mass="0.006946" diaginertia="1e-06 1e-06 1e-06" />
+                <joint name="ANKLE_PITCH_R" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="1.0" />
+                <inertial pos="0 0 0" mass="0.006946" diaginertia="1e-04 1e-04 1e-04" />
                 <geom type="mesh" mesh="ANKLE_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
                 <body name="FOOT_R" pos="0 0 0" quat="0.7071067811140325 -0.7071067812590626 0.0 0.0">
                   <joint name="ANKLE_ROLL_R" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
                   <inertial pos="0.0337 5.00E-05 0.04684" mass="0.41628" fullinertia="0.002594 0.002998 0.000722 9.89e-07 0.000725 1.24e-06" />
                   <geom type="mesh" mesh="FOOT_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
-                  <geom name="FOOT_R_heel_in" type="sphere" size="0.015" pos="-0.05 0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
+                  <!-- <geom name="FOOT_R_heel_in" type="sphere" size="0.015" pos="-0.05 0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
                   <geom name="FOOT_R_heel_out" type="sphere" size="0.015" pos="-0.05 -0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
                   <geom name="FOOT_R_toe_in" type="sphere" size="0.015" pos="0.12 0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
-                  <geom name="FOOT_R_toe_out" type="sphere" size="0.015" pos="0.12 -0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
+                  <geom name="FOOT_R_toe_out" type="sphere" size="0.015" pos="0.12 -0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" /> -->
                 </body>
               </body>
             </body>
@@ -89,29 +89,29 @@
         <inertial pos="0.00398 -0.00006 0.00636" mass="0.83264" diaginertia="0.0019 0.00124 0.00094" />
         <geom type="mesh" mesh="HIP_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
         <body name="HIP_ABAD_L" pos="0.141 0 0" quat="0.4999999998974482 0.5 -0.5000000001025517 -0.5">
-          <joint name="HIP_ROLL_L" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
+          <joint name="HIP_ROLL_L" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="0.2" />
           <inertial pos="0.00198 0.00146 0.00395" mass="2.818" fullinertia="0.01442 0.00791 0.0072 0.0 2e-05 0.0" />
           <geom type="mesh" mesh="HIP_ABAD_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
           <body name="FEMUR_L" pos="-0.029 0 0" quat="0.6532814823289134 -0.27059805020292127 0.6532814824399145 -0.2705980502029213">
-            <joint name="HIP_PITCH_L" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
+            <joint name="HIP_PITCH_L" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="0.2" />
             <inertial pos="0.06112 0.00177 -0.02002" mass="3.75393" fullinertia="0.01172 0.07027 0.07595 0.00157 -0.00098 -0.00014" />
             <geom type="mesh" mesh="FEMUR_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
             <body name="TIBIA_L" pos="0.375 0 0">
-              <joint name="KNEE_PITCH_L" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
+              <joint name="KNEE_PITCH_L" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="0.2" />
               <inertial pos="0.09678 0.00694 -0.00006" mass="1.27716" fullinertia="0.00091 0.02323 0.02318 0.00069 -1e-05 0.0" />
               <geom type="mesh" mesh="TIBIA_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
               <body name="ANKLE_L" pos="0.375 0 0">
-                <joint name="ANKLE_PITCH_L" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
-                <inertial pos="0 0 0" mass="0.006946" diaginertia="1e-06 1e-06 1e-06" />
+                <joint name="ANKLE_PITCH_L" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="1.0" />
+                <inertial pos="0 0 0" mass="0.006946" diaginertia="1e-04 1e-04 1e-04" />
                 <geom type="mesh" mesh="ANKLE_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
                 <body name="FOOT_L" pos="0 0 0" quat="0.7071067811140325 -0.7071067812590626 0.0 0.0">
                   <joint name="ANKLE_ROLL_L" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
                   <inertial pos="0.0337 5.00E-05 0.04684" mass="0.41628" fullinertia="0.002594 0.002998 0.000722 9.89e-07 0.000725 1.24e-06" />
                   <geom type="mesh" mesh="FOOT_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
-                  <geom name="FOOT_L_heel_in" type="sphere" size="0.015" pos="-0.05 0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
+                  <!-- <geom name="FOOT_L_heel_in" type="sphere" size="0.015" pos="-0.05 0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
                   <geom name="FOOT_L_heel_out" type="sphere" size="0.015" pos="-0.05 -0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
                   <geom name="FOOT_L_toe_in" type="sphere" size="0.015" pos="0.12 0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
-                  <geom name="FOOT_L_toe_out" type="sphere" size="0.015" pos="0.12 -0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" />
+                  <geom name="FOOT_L_toe_out" type="sphere" size="0.015" pos="0.12 -0.06 0.08" rgba="0.9 0.1 0.1 0.5" contype="1" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" /> -->
                 </body>
               </body>
             </body>
@@ -143,8 +143,8 @@
                   <inertial pos="0.05463 -0.00013 9.00E-05" mass="0.37004" fullinertia="0.000277159 0.001412655 0.001337476 -3.87e-06 2.51e-06 5.51e-08" />
                   <geom type="mesh" mesh="UPPERWRIST_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
                   <body name="LOWERWRIST_R" pos="0 0 0" quat="2.0852339467722704e-10 0.7071067811140325 -2.0852339471999592e-10 0.7071067812590626">
-                    <joint name="WRIST_YAW_R" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="0.2" />
-                    <inertial pos="0 2.42E-06 0.00010824" mass="0.42" diaginertia="1e-06 1e-06 1e-06" />
+                    <joint name="WRIST_YAW_R" type="hinge" axis="0 0 -1" range="-3.14 3.14" damping="1" />
+                    <inertial pos="0 2.42E-06 0.00010824" mass="0.42" diaginertia="1e-04 1e-04 1e-04" />
                     <geom type="mesh" mesh="LOWERWRIST_R" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
                   </body>
                 </body>
@@ -178,8 +178,8 @@
                   <inertial pos="0.05463 0.00013 7.00E-05" mass="0.37004" fullinertia="0.000277159 0.001412655 0.001337475 3.87e-06 2.13e-06 -5.78e-08" />
                   <geom type="mesh" mesh="UPPERWRIST_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
                   <body name="LOWERWRIST_L" pos="0 0 0" quat="2.0852339467722704e-10 0.7071067811140325 -2.0852339471999592e-10 0.7071067812590626">
-                    <joint name="WRIST_YAW_L" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="0.2" />
-                    <inertial pos="0 -2.37E-06 0.00010824" mass="0.42" diaginertia="1e-06 1e-06 1e-06" />
+                    <joint name="WRIST_YAW_L" type="hinge" axis="0 0 1" range="-3.14 3.14" damping="1" />
+                    <inertial pos="0 -2.37E-06 0.00010824" mass="0.42" diaginertia="1e-04 1e-04 1e-04" />
                     <geom type="mesh" mesh="LOWERWRIST_L" rgba="0.792156863 0.819607843 0.933333333 1" contype="0" conaffinity="0" group="1" />
                   </body>
                 </body>

@@ -30,29 +30,29 @@ class PDController:
         self.kd = np.zeros(28, dtype=np.float64)
         self.torque_limits = np.zeros(28, dtype=np.float64)
         
-        # Right leg (0-5)
-        self.kp[0:6] = self.ctrl_config.leg_gains[0]
-        self.kd[0:6] = self.ctrl_config.leg_gains[1]
+        # Right leg (0-5): hip roll/pitch/yaw (0-2), knee pitch (3), ankle pitch/roll (4-5)
+        self.kp[0:4] = self.ctrl_config.leg_gains[0]
+        self.kd[0:4] = self.ctrl_config.leg_gains[1]
+        self.kp[4:6] = self.ctrl_config.ankle_gains[0]  # Reduced gains for ankle
+        self.kd[4:6] = self.ctrl_config.ankle_gains[1]
         self.torque_limits[0:6] = self.ctrl_config.leg_torque_limit
         
-        # Left leg (6-11)
-        self.kp[6:12] = self.ctrl_config.leg_gains[0]
-        self.kd[6:12] = self.ctrl_config.leg_gains[1]
+        # Left leg (6-11): hip roll/pitch/yaw (6-8), knee pitch (9), ankle pitch/roll (10-11)
+        self.kp[6:10] = self.ctrl_config.leg_gains[0]
+        self.kd[6:10] = self.ctrl_config.leg_gains[1]
+        self.kp[10:12] = self.ctrl_config.ankle_gains[0]  # Reduced gains for ankle
+        self.kd[10:12] = self.ctrl_config.ankle_gains[1]
         self.torque_limits[6:12] = self.ctrl_config.leg_torque_limit
         
         # Right arm (12-18)
         self.kp[12:19] = self.ctrl_config.arm_gains[0]
         self.kd[12:19] = self.ctrl_config.arm_gains[1]
         self.torque_limits[12:19] = self.ctrl_config.arm_torque_limit
-        self.kp[19] = self.ctrl_config.arm_gains[0]*0
-        self.kd[19] = self.ctrl_config.arm_gains[1]*0
         
         # Left arm (19-25)
         self.kp[19:26] = self.ctrl_config.arm_gains[0]
         self.kd[19:26] = self.ctrl_config.arm_gains[1]
         self.torque_limits[19:26] = self.ctrl_config.arm_torque_limit
-        self.kp[26] = self.ctrl_config.arm_gains[0]*0
-        self.kd[26] = self.ctrl_config.arm_gains[1]*0
         
         # Head (26-27)
         self.kp[26:28] = self.ctrl_config.head_gains[0]
@@ -60,7 +60,8 @@ class PDController:
         self.torque_limits[26:28] = self.ctrl_config.head_torque_limit
         
         print(f"[PD Controller] Initialized with gains:")
-        print(f"  Legs: Kp={self.ctrl_config.leg_gains[0]}, Kd={self.ctrl_config.leg_gains[1]}")
+        print(f"  Legs (hip/knee): Kp={self.ctrl_config.leg_gains[0]}, Kd={self.ctrl_config.leg_gains[1]}")
+        print(f"  Ankles: Kp={self.ctrl_config.ankle_gains[0]}, Kd={self.ctrl_config.ankle_gains[1]}")
         print(f"  Arms: Kp={self.ctrl_config.arm_gains[0]}, Kd={self.ctrl_config.arm_gains[1]}")
         print(f"  Head: Kp={self.ctrl_config.head_gains[0]}, Kd={self.ctrl_config.head_gains[1]}")
     

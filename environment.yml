@@ -1,0 +1,18 @@
+name: mirror
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - opencv
+
+  # pip-only packages
+  - pip
+  - pip:
+    - mujoco
+    - osqp
+
+    # Optional: GPU QP solver (uncomment if needed)
+    - torch
