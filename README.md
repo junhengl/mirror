@@ -24,7 +24,6 @@ cd mirror
 Optional flags:
 - `--no-camera` - Disable ZED camera (use dummy tracking data)
 - `--headless` - Run without viewer visualization
-- `--model themis` - Use Themis model instead of default Westwood
 
 ### Configuration
 
