@@ -4,6 +4,19 @@ Complete real-time simulation pipeline for humanoid robot body tracking with par
 
 ![Title](assets/title.gif)
 
+- website: https://caltech-amber.github.io/mirror/
+- paper: https://arxiv.org/pdf/2603.23995
+
+- bibtex:
+```bash
+@article{li2026mirror,
+  title={MIRROR: Visual Motion Imitation via Real-time Retargeting and Teleoperation with Parallel Differential Inverse Kinematics},
+  author={Li, Junheng and Yang, Lizhi and Ames, Aaron D},
+  journal={arXiv preprint arXiv:2603.23995},
+  year={2026}
+}
+```
+
 ## Quick Start
 
 ### Environment Setup
